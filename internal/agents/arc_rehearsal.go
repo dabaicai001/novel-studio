@@ -191,7 +191,19 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 		}
 		capture(message)
 	}
-	payload, err := BuildArcRehearsalModelPayload(input, draft)
+	// The review must reproduce the draft's structure entry by entry, so it gets
+	// the literal transport view: the interned view renames repeated field names
+	// to k1/k2 aliases and replaces repeated subtrees with {"$v":"v0001"} markers,
+	// which asks the model to invert an encoding before it can answer. Measured
+	// rejections included a self-invented `json: unknown field "$text"` (a marker
+	// imitating "$v") plus renamed and dropped material checks. The Architect
+	// phase keeps the interned payload, where only semantics must survive.
+	var payload []byte
+	if draft != nil {
+		payload, err = BuildArcRehearsalLiteralModelPayload(input, draft)
+	} else {
+		payload, err = BuildArcRehearsalModelPayload(input, draft)
+	}
 	if err != nil {
 		return domain.ArcRehearsalBody{}, call, err
 	}

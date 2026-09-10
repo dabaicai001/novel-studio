@@ -23,6 +23,18 @@ func BuildArcRehearsalModelPayload(input domain.ArcRehearsalInput, draft *domain
 	return compactArcRehearsalJSON(raw)
 }
 
+// BuildArcRehearsalLiteralModelPayload returns the same transport view without
+// any interning: real field names, literal subtrees. Use it whenever the model
+// must reproduce the structure rather than only reason about it (the review
+// phase). The interned view is strictly smaller, but it hands the model an
+// encoding to invert: repeated long field names become k1/k2 aliases and
+// repeated subtrees become {"$v":"v0001"} markers, and the model then imitates
+// those markers in its own submission (measured: `json: unknown field "$text"`
+// plus renamed and dropped material checks across a review retry budget).
+func BuildArcRehearsalLiteralModelPayload(input domain.ArcRehearsalInput, draft *domain.ArcRehearsalDraft) ([]byte, error) {
+	return json.Marshal(map[string]any{"input": input, "architect_draft": draft})
+}
+
 func compactArcRehearsalJSON(raw []byte) ([]byte, error) {
 	var root any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
