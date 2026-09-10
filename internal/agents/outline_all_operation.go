@@ -114,6 +114,13 @@ func runOutlineAllOperationWithModel(
 	if err != nil {
 		return err
 	}
+	arcContractAuthorization, err := outlineAllArcContractAuthorization(st, prompt)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(arcContractAuthorization) != "" {
+		finalAuthorization = finalAuthorization + "\n\n" + arcContractAuthorization
+	}
 	logger := st.Sessions.SubAgentLogger(func(string) (string, string) {
 		return resolved.Provider, resolved.Name
 	})
@@ -305,6 +312,67 @@ func outlineAllFinalAuthorization(prompt string) (string, error) {
 		summary,
 		target,
 	), nil
+}
+
+// outlineAllArcContractAuthorization renders the host-frozen contract_refs
+// whitelist for the arc this operation may write. The model is otherwise
+// asked to infer "this arc owns no contracts" from a 70k+ token context that
+// lists every other arc's refs, and any globally valid ref attached to the
+// wrong arc is rejected as unknown_contract_ref no matter how concretely the
+// chapter realizes it. Naming the authorized set removes that inference.
+func outlineAllArcContractAuthorization(st *store.Store, prompt string) (string, error) {
+	if st == nil {
+		return "", nil
+	}
+	action, err := domain.ParseOutlineAllIntent(prompt)
+	if err != nil {
+		return "", fmt.Errorf("outline-all arc contract authorization: %w", err)
+	}
+	if action.Type != domain.OutlineAllActionExpandArc && action.Type != domain.OutlineAllActionReviseArc {
+		return "", nil
+	}
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil || len(volumes) == 0 {
+		// Fail soft: the clause is a clarification, not a gate. Structural
+		// authorization stays with the frozen intent and save_foundation.
+		return "", nil
+	}
+	cursor := 1
+	for _, volume := range volumes {
+		for _, arc := range volume.Arcs {
+			start := cursor
+			cursor += arc.ChapterSpan()
+			if volume.Index != action.Volume || arc.Index != action.Arc {
+				continue
+			}
+			last := start + max(0, arc.ChapterSpan()) - 1
+			lines := []string{
+				"[HOST FROZEN CONTRACT REFS / ARC LOCAL]",
+				fmt.Sprintf("本弧 V%dA%d 覆盖全局第 %d-%d 章。", volume.Index, arc.Index, start, last),
+			}
+			if len(arc.ContractRefs) == 0 {
+				lines = append(lines,
+					"本弧授权的 contract_refs 为空：content 中每一个 OutlineEntry 的 contract_refs 必须是 []，不得出现任何 ref。",
+					"某个合同的语义与本弧剧情相关也不构成授权：它已被 map_contracts 分配给别的弧，挂到本弧一律以 unknown_contract_ref 拒绝，且补写内容无法修复。",
+				)
+				return strings.Join(lines, "\n"), nil
+			}
+			items := make([]string, 0, len(arc.ContractRefs))
+			for _, ref := range arc.ContractRefs {
+				items = append(items, fmt.Sprintf(
+					"- %s（kind=%s，只能挂在全局第 %d 章，且该章 core_event/scenes 要具体落实 planned_resolution 的行动者+行动+终态）",
+					ref.ID, ref.Kind, ref.PlannedPayoffChapter,
+				))
+			}
+			lines = append(lines,
+				"本弧授权的 contract_refs 只有下列项，必须逐字原样放入且各恰好出现一次，不得新增、删除或改写：",
+				strings.Join(items, "\n"),
+				"未列出的 ref 一律非法（unknown_contract_ref）；列出的 ref 未出现在其指定章号即为 payoff_count 不足。",
+			)
+			return strings.Join(lines, "\n"), nil
+		}
+	}
+	return "", nil
 }
 
 func successfulOutlineAllSave(result json.RawMessage) bool {

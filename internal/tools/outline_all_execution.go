@@ -268,10 +268,52 @@ func validateOutlineAllArcMutationContent(
 }
 
 func validateOutlineAllArcContractPayoffs(arc domain.ArcOutline, globalStart int) error {
-	if issues := domain.OutlineArcContractPayoffIssues(arc, globalStart); len(issues) > 0 {
-		return fmt.Errorf("outline_all arc contract payoff invalid (%s): contract ref alone is insufficient; core_event/scenes must concretely realize the planned actor, action, and terminal state without negation, quotation-only, or future-plan language: %w", strings.Join(issues, "; "), errs.ErrToolPrecondition)
+	issues := domain.OutlineArcContractPayoffIssues(arc, globalStart)
+	if len(issues) == 0 {
+		return nil
 	}
-	return nil
+	// The generic "realize it concretely" hint is actively misleading for the
+	// structural issue kinds: an unknown/misplaced/drifted ref cannot be fixed
+	// by writing richer prose, only by attaching the ref where map_contracts
+	// froze it (or by dropping it from an arc that owns none). Sending the
+	// wrong hint makes the model rewrite content until MaxTurns is exhausted.
+	hint := "core_event/scenes must concretely realize the planned actor, action, and terminal state without negation, quotation-only, or future-plan language"
+	if outlineAllArcContractIssuesAreStructural(issues) {
+		hint = fmt.Sprintf(
+			"本弧授权的 contract_refs 只有 %s；unknown_contract_ref/contract_ref_drift/misplaced_contract_ref/payoff_count 属于 ref 归属问题，必须按白名单删除或改挂到指定章号，补写或不写内容都无法修复",
+			outlineAllArcAuthorizedRefs(arc.ContractRefs),
+		)
+	}
+	return fmt.Errorf("outline_all arc contract payoff invalid (%s): %s: %w", strings.Join(issues, "; "), hint, errs.ErrToolPrecondition)
+}
+
+func outlineAllArcContractIssuesAreStructural(issues []string) bool {
+	prefixes := []string{
+		"unknown_contract_ref=",
+		"contract_ref_drift=",
+		"misplaced_contract_ref=",
+		"arc_contract_ref=",
+		`contract_ref="`,
+	}
+	for _, issue := range issues {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(issue, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func outlineAllArcAuthorizedRefs(refs []domain.StoryContractRef) string {
+	if len(refs) == 0 {
+		return "空（本弧不得出现任何 contract_refs）"
+	}
+	items := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		items = append(items, fmt.Sprintf("%s@ch%d", ref.ID, ref.PlannedPayoffChapter))
+	}
+	return strings.Join(items, ", ")
 }
 
 func guardOutlineAllFoundationType(st *store.Store, kind, scale string) error {

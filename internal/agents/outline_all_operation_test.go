@@ -437,3 +437,92 @@ func TestRunOutlineAllOperationWithModelRejectsNonSaveCapability(t *testing.T) {
 		t.Fatalf("wrong capability error = %v", err)
 	}
 }
+
+// A zero-contract arc is the common case (map_contracts assigns every
+// ending/non_negotiable to the final arc), and the model cannot infer "this arc
+// owns nothing" from a context that lists every other arc's refs. The host must
+// say it, or the model attaches a globally valid ref and burns every turn on a
+// rejection that richer prose can never fix.
+func TestOutlineAllArcContractAuthorizationNamesTheOnlyAuthorizedRefs(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	ref := domain.StoryContractRef{
+		ID:                   "open_thread-05-7eb7fe3e2f5a",
+		Kind:                 "open_thread",
+		SourceDigest:         domain.PlanningV2DigestPrefix + strings.Repeat("b", 64),
+		PlannedPayoffChapter: 12,
+		PlannedResolution:    "柳青云于望月崖宣布散修联盟重建，兑现守护身边人的真意",
+	}
+	if err := st.Outline.SaveLayeredOutline([]domain.VolumeOutline{{
+		Index: 1,
+		Title: "第一卷",
+		Arcs: []domain.ArcOutline{
+			{Index: 1, Title: "零契约弧", EstimatedChapters: 8},
+			{Index: 2, Title: "带契约弧", EstimatedChapters: 6, ContractRefs: []domain.StoryContractRef{ref}},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyClause, err := outlineAllArcContractAuthorization(st, outlineAllOperationTask(t, 4, 1, 1, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"V1A1", "第 1-8 章", "contract_refs 为空", "不得出现任何 ref", "unknown_contract_ref"} {
+		if !strings.Contains(emptyClause, want) {
+			t.Fatalf("zero-contract arc clause missing %q: %q", want, emptyClause)
+		}
+	}
+
+	ownerClause, err := outlineAllArcContractAuthorization(st, outlineAllOperationTask(t, 5, 1, 2, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"V1A2", "第 9-14 章", ref.ID, "全局第 12 章", "不得新增、删除或改写"} {
+		if !strings.Contains(ownerClause, want) {
+			t.Fatalf("contract-owning arc clause missing %q: %q", want, ownerClause)
+		}
+	}
+	if strings.Contains(ownerClause, "contract_refs 为空") {
+		t.Fatalf("contract-owning arc clause wrongly claims an empty whitelist: %q", ownerClause)
+	}
+
+	// The clause must actually reach the model's final authorization, not just
+	// exist as a helper.
+	model := &outlineAllOperationCaptureModel{response: agentcore.Message{
+		Role:       agentcore.RoleAssistant,
+		StopReason: agentcore.StopReasonToolUse,
+		Content: []agentcore.ContentBlock{agentcore.ToolCallBlock(agentcore.ToolCall{
+			ID:   "save-1",
+			Name: "save_foundation",
+			Args: json.RawMessage(`{"type":"expand_arc"}`),
+		})},
+	}}
+	saveTool := agentcore.NewFuncTool(
+		"save_foundation",
+		"test save",
+		map[string]any{"type": "object"},
+		func(context.Context, json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"saved":true,"outline_all":true,"type":"expand_arc"}`), nil
+		},
+	)
+	if err := runOutlineAllOperationWithModel(
+		context.Background(),
+		bootstrap.Config{},
+		assets.Bundle{Prompts: assets.Prompts{ArchitectLong: "ARCHITECT-LONG-SYSTEM"}},
+		st,
+		outlineAllOperationTask(t, 4, 1, 1, 8),
+		outlineAllOperationModel{ChatModel: model, Provider: "architect-provider", Name: "architect-main"},
+		saveTool,
+	); err != nil {
+		t.Fatalf("run direct operation: %v", err)
+	}
+	authorization := model.messages[len(model.messages)-1].TextContent()
+	for _, want := range []string{"HOST FROZEN CONTRACT REFS / ARC LOCAL", "contract_refs 为空", "不得出现任何 ref"} {
+		if !strings.Contains(authorization, want) {
+			t.Fatalf("final authorization missing %q: %q", want, authorization)
+		}
+	}
+}
