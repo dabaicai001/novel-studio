@@ -1072,9 +1072,11 @@ func singleSubagentModeGate() agentcore.ToolGate {
 			return nil, nil
 		}
 		for _, forbidden := range []string{"tasks", "chain", "team_name"} {
-			if _, exists := raw[forbidden]; exists {
-				return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 只允许 subagent 的单任务 agent+task 模式；并行/链式/team 会破坏单世界状态的单写者顺序"}, nil
+			value, exists := raw[forbidden]
+			if !exists || emptyGateValue(value) {
+				continue
 			}
+			return &agentcore.GateDecision{Allowed: false, Reason: "novel-studio 只允许 subagent 的单任务 agent+task 模式；并行/链式/team 会破坏单世界状态的单写者顺序"}, nil
 		}
 		if value, exists := raw["background"]; exists {
 			var background bool
@@ -1084,6 +1086,17 @@ func singleSubagentModeGate() agentcore.ToolGate {
 		}
 		return nil, nil
 	}
+}
+
+// emptyGateValue 判断模型给出的可选字段是否为空值：[]、{}、""、null。
+// 部分模型（如 MiniMax）会把工具 schema 中的所有属性都填上，未使用的写成空值；
+// 空值等于没有请求并行/链式/team 模式，不应触发单写者闸门。
+func emptyGateValue(raw json.RawMessage) bool {
+	switch strings.TrimSpace(string(raw)) {
+	case "", "null", "[]", "{}", `""`:
+		return true
+	}
+	return false
 }
 
 // pipelineRenderAgentGate makes the process-wide render lease visible at the
