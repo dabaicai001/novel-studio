@@ -480,7 +480,7 @@ func TestOutlineAllArcContractAuthorizationNamesTheOnlyAuthorizedRefs(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"V1A2", "第 9-14 章", ref.ID, "全局第 12 章", "不得新增、删除或改写"} {
+	for _, want := range []string{"V1A2", "第 9-14 章", ref.ID, "必须挂在全局第 12 章", "contract_ref_drift", ref.SourceDigest, ref.PlannedResolution} {
 		if !strings.Contains(ownerClause, want) {
 			t.Fatalf("contract-owning arc clause missing %q: %q", want, ownerClause)
 		}

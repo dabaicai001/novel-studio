@@ -359,13 +359,17 @@ func outlineAllArcContractAuthorization(st *store.Store, prompt string) (string,
 			}
 			items := make([]string, 0, len(arc.ContractRefs))
 			for _, ref := range arc.ContractRefs {
+				encoded, err := json.Marshal(ref)
+				if err != nil {
+					return "", fmt.Errorf("outline-all arc contract authorization: %w", err)
+				}
 				items = append(items, fmt.Sprintf(
-					"- %s（kind=%s，只能挂在全局第 %d 章，且该章 core_event/scenes 要具体落实 planned_resolution 的行动者+行动+终态）",
-					ref.ID, ref.Kind, ref.PlannedPayoffChapter,
+					"- 必须挂在全局第 %d 章，且该章 core_event/scenes 要具体落实 planned_resolution 的行动者+行动+终态；contract_refs 里请逐字复制这个对象：\n  %s",
+					ref.PlannedPayoffChapter, encoded,
 				))
 			}
 			lines = append(lines,
-				"本弧授权的 contract_refs 只有下列项，必须逐字原样放入且各恰好出现一次，不得新增、删除或改写：",
+				"本弧授权的 contract_refs 只有下列项，每一项必须出现在指定章号且各恰好出现一次。对象字段必须与下面给出的完全一致：id/kind/source_digest/planned_payoff_chapter/planned_resolution 全部原样复制，不要改写、概括、翻译或省略——同 id 字段不同会被判 contract_ref_drift（模型凭记忆重写 planned_resolution 是最常见的失败原因）：",
 				strings.Join(items, "\n"),
 				"未列出的 ref 一律非法（unknown_contract_ref）；列出的 ref 未出现在其指定章号即为 payoff_count 不足。",
 			)

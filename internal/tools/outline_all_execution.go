@@ -280,7 +280,11 @@ func validateOutlineAllArcContractPayoffs(arc domain.ArcOutline, globalStart int
 	hint := "core_event/scenes must concretely realize the planned actor, action, and terminal state without negation, quotation-only, or future-plan language"
 	if outlineAllArcContractIssuesAreStructural(issues) {
 		hint = fmt.Sprintf(
-			"本弧授权的 contract_refs 只有 %s；unknown_contract_ref/contract_ref_drift/misplaced_contract_ref/payoff_count 属于 ref 归属问题，必须按白名单删除或改挂到指定章号，补写或不写内容都无法修复",
+			"本弧授权的 contract_refs 只有 %s；这类问题是 ref 归属/对象不一致，补写或不写内容都无法修复："+
+				"unknown_contract_ref=该 ref 未分配给本弧，必须从 content 删除；"+
+				"contract_ref_drift=同一 id 的字段与冻结值不一致，必须逐字复制授权区给出的完整 ref 对象（planned_resolution 与 source_digest 尤其不能改写或概括）；"+
+				"misplaced_contract_ref=章号挂错，改挂到授权的章号；"+
+				"payoff_count=该 ref 没有出现在它被授权的那个章号上",
 			outlineAllArcAuthorizedRefs(arc.ContractRefs),
 		)
 	}
