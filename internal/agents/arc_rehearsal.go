@@ -38,11 +38,13 @@ const arcRehearsalReviewPrompt = "\n你是复核者：独立检查Architect草�
 // violation. Two failure shapes consume attempts: distinct field repairs, and
 // outright malformed submissions when the model truncates its own oversized
 // JSON ("unexpected end of JSON input"), which only a clean retry can clear.
-// With a ceiling of 4 the Architect exhausted its budget mid-repair (measured on
-// the first arc: 2 capability rejections, then 2 character-conflict rejections,
-// then "max turns (4) reached"). Keep the ceiling configurable downward, never
-// upward.
-const arcRehearsalMaxTurns = 30
+// A ceiling of 4 exhausted the budget mid-repair (measured on the first arc: 2
+// capability rejections, then 2 character-conflict rejections, then "max turns
+// (4) reached"); the ceiling is 10 to leave room for a couple of clean retries
+// without letting a looping model spend an unbounded budget on one arc (each
+// turn carries a ~100k-token prompt). Keep the ceiling configurable downward,
+// never upward.
+const arcRehearsalMaxTurns = 10
 
 func ArcRehearsalProtocolDigest() (string, error) {
 	tool := &submitArcRehearsalTool{}
