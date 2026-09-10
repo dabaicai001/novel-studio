@@ -402,40 +402,56 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 // original dependency by key. Additions remain subject to the same typed/global
 // checks; independent display order is not a new execution constraint. Callers
 // authenticate the host-bound draft separately; this cannot create Call data.
+//
+// The preservation rules are reported as one complete list rather than the first
+// violation. A review re-emits the whole body, so a single rejection that
+// exposes only one renamed or dropped entry makes the model repair the report
+// one field per turn (measured: 10 turns exhausted while fixing distinct
+// entries), and every entry it must copy is host-owned text it cannot guess.
 func ValidateArcRehearsalReviewBody(input ArcRehearsalInput, draft, review ArcRehearsalBody) error {
 	if err := ValidateArcRehearsalBody(input, review); err != nil {
 		return err
 	}
+	var issues []string
 	for _, prior := range draft.MaterialChecks {
-		found := false
-		for _, current := range review.MaterialChecks {
-			if current.Operation == prior.Operation {
-				found = true
-				if prior.RequiresReadable && !current.RequiresReadable {
-					return fmt.Errorf("review cannot remove a declared readable-material dependency")
-				}
-				if input.ExecutionCapabilities != nil {
-					for _, original := range prior.CapabilityRequirements {
-						preserved := false
-						for _, requirement := range current.CapabilityRequirements {
-							if original.Key == requirement.Key && samePhysicalValueV2(original, requirement) {
-								preserved = true
-								break
-							}
-						}
-						if !preserved {
-							return fmt.Errorf("review cannot rewrite declared execution dependencies for %q", prior.Operation)
-						}
-					}
-				}
-				if input.ExecutionCapabilities != nil && prior.Status != "not_required" && current.Status == "not_required" {
-					return fmt.Errorf("review cannot discard a selected material dependency")
-				}
+		var current *ArcRehearsalMaterialCheck
+		for i := range review.MaterialChecks {
+			if review.MaterialChecks[i].Operation == prior.Operation {
+				current = &review.MaterialChecks[i]
+				break
 			}
 		}
-		if !found {
-			return fmt.Errorf("review omitted draft material check %q", prior.Operation)
+		if current == nil {
+			issues = append(issues, fmt.Sprintf("缺 material_check %q（operation 字符串必须逐字复制草稿，改名即视为漏项；把这一条按草稿原样补回）", prior.Operation))
+			continue
 		}
+		if prior.RequiresReadable && !current.RequiresReadable {
+			issues = append(issues, fmt.Sprintf("material_check %q 的 requires_readable 不能由 true 改成 false", prior.Operation))
+		}
+		if input.ExecutionCapabilities != nil {
+			for _, original := range prior.CapabilityRequirements {
+				preserved := false
+				for _, requirement := range current.CapabilityRequirements {
+					if original.Key == requirement.Key && samePhysicalValueV2(original, requirement) {
+						preserved = true
+						break
+					}
+				}
+				if !preserved {
+					encoded, err := json.Marshal(original)
+					if err != nil {
+						encoded = []byte(`"<unencodable>"`)
+					}
+					issues = append(issues, fmt.Sprintf("material_check %q 的 capability_requirement key=%q 被改写或删除；必须原样保留这个对象：%s", prior.Operation, original.Key, encoded))
+				}
+			}
+			if prior.Status != "not_required" && current.Status == "not_required" {
+				issues = append(issues, fmt.Sprintf("material_check %q 的 status 不能改成 not_required", prior.Operation))
+			}
+		}
+	}
+	if len(issues) > 0 {
+		return fmt.Errorf("arc rehearsal review cannot rewrite declared execution dependencies or omit draft material checks（草稿共 %d 条 material_checks，全部必须原样保留，只允许新增）: %s", len(draft.MaterialChecks), strings.Join(issues, "；"))
 	}
 	return nil
 }
