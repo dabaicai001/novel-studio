@@ -296,6 +296,17 @@
   .chrow .chmeta { color: var(--muted); font-size: 12px; flex: none; }
   .chrow .chevent { color: var(--muted); font-size: 11.5px; flex: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.7; }
+  /* ---------- 继续任务 ---------- */
+  .taskbar { display: flex; flex-direction: column; gap: 9px; }
+  .taskrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .taskbtn { background: var(--surface-soft); border: 1px solid var(--line); color: var(--text); padding: 6px 13px; border-radius: 8px; cursor: pointer; font-size: 12.5px; }
+  .taskbtn:hover:not(:disabled) { border-color: var(--muted); }
+  .taskbtn:disabled { opacity: .45; cursor: default; }
+  .taskbtn.primary { border-color: var(--accent1); color: var(--accent1); font-weight: 600; }
+  .taskbar select { background: var(--surface-soft); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 5px 8px; font-size: 12px; }
+  .taskstate { color: var(--muted); font-size: 12px; }
+  .taskhint { color: var(--muted); font-size: 11.5px; line-height: 1.75; }
+  .tasklog { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; max-height: 150px; overflow: auto; white-space: pre-wrap; }
   .reader-mask { position: fixed; inset: 0; background: rgba(4,6,10,.62); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 900; }
   .reader-mask.show { opacity: 1; pointer-events: auto; }
   .reader {
@@ -1076,6 +1087,7 @@ function renderOverview(d) {
   const healthTag = `<span class="tag health-${health.status || "warning"}">${healthName[health.status] || "待校验"}</span>`;
   const workTitle = w.mode === "rag" ? "RAG 重建" : w.mode === "planning" ? planningWorkTitle(w, runtime) : w.mode === "rewrite" ? `返工第 ${w.chapter} 章` : chapterText(w.chapter, "尚未进入章节");
   return `
+    ${renderTaskBar(d.task)}
     <div class="detail-kpis">
       <div class="detail-kpi"><div class="k">正文游标</div><div class="v">${chapterText(d.current_chapter)}</div></div>
       <div class="detail-kpi"><div class="k">实际工作</div><div class="v">${workTitle}</div></div>
@@ -1541,7 +1553,7 @@ function renderLog(d) {
   const events = [...(runtime.recent_events || [])].reverse().map(e => `<div class="event-row ${e.failed ? "failed" : ""}"><time>${shortTime(e.time)}</time><span>${esc(e.agent) || "system"}</span><span>${esc(e.category) || "event"}</span><span>${esc(e.summary) || esc(e.detail)}${e.failed && e.summary && e.detail ? `<details><summary>失败详情</summary><small>${esc(e.detail)}</small></details>` : ""}</span></div>`).join("");
   const lines = (d.log || []).map(l =>
     `<span class="${/ERROR|WARN|失败|错误/.test(l) ? "hl" : ""}">${esc(l)}</span>`).join("\n");
-  return `<div class="detail-kpis">
+  return `${renderTaskBar(d.task)}<div class="detail-kpis">
     <div class="detail-kpi"><div class="k">运行状态</div><div class="v">${runtimeName[runtime.status] || "—"}</div></div>
     <div class="detail-kpi"><div class="k">Provider</div><div class="v">${esc(runtime.provider) || "—"}</div></div>
     <div class="detail-kpi"><div class="k">模型</div><div class="v">${esc(runtime.model) || "—"}</div></div>
@@ -1552,6 +1564,79 @@ function renderLog(d) {
   <div class="sec"><h3>实时事件（近 ${(runtime.recent_events || []).length} 条）</h3>${events ? `<div class="event-list">${events}</div>` : '<div class="loading">暂无运行事件。</div>'}</div>
   <div class="sec"><h3>原始日志（末尾 ${(d.log || []).length} 行，自动刷新）</h3><div class="log" id="d-log">${lines || "（暂无日志）"}</div></div>`;
 }
+
+/* ---------- 继续任务（写动作，服务端默认关闭） ---------- */
+let taskMessage = "";
+
+const postTask = (dir, body) => fetch(`/api/novels/${encodeURIComponent(dir)}/task`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-Novel-Studio-Action": "1" },
+  body: JSON.stringify(body),
+}).then(r => r.json());
+
+function renderTaskBar(task) {
+  task = task || {};
+  const state = task.state || "idle";
+  const running = state === "running";
+  const fin = task.finished || null;
+  const stateText = running
+    ? `<span class="tag now">运行中</span> pid ${task.pid}　开始 ${esc(task.started_at || "")}`
+    : fin && fin.exit_code === 0
+      ? `<span class="tag accept">上次成功</span> ${esc(fin.at || "")}`
+      : fin
+        ? `<span class="tag fail">上次失败（退出码 ${fin.exit_code}）</span> ${esc(fin.at || "")}`
+        : state === "stopped"
+          ? '<span class="tag pending">已停止</span>'
+          : '<span class="tag pending">空闲</span>';
+  if (!task.enabled) {
+    return `<div class="sec"><h3>继续任务</h3><div class="panel taskbar">
+      <div class="taskstate">页面上的写操作未开启：服务端需设置 <code>NOVEL_STUDIO_DASHBOARD_ALLOW_WRITE=1</code>。</div>
+    </div></div>`;
+  }
+  const log = (task.log_tail || []).slice(-8).map(l => esc(String(l).slice(0, 220))).join("\n");
+  return `<div class="sec"><h3>继续任务</h3><div class="panel taskbar">
+    <div class="taskrow">
+      <button class="taskbtn primary" type="button" data-task-action="start" data-task-mode="resume" ${running ? "disabled" : ""}>▶ 继续任务</button>
+      <select id="task-runs" aria-label="连续执行次数" ${running ? "disabled" : ""}>
+        <option value="1">执行 1 次</option>
+        <option value="3">连续 3 次</option>
+        <option value="10">连续 10 次</option>
+      </select>
+      <button class="taskbtn" type="button" data-task-action="start" data-task-mode="render" ${running ? "disabled" : ""}>只推进正文</button>
+      <button class="taskbtn" type="button" data-task-action="stop" ${running ? "" : "disabled"}>■ 停止</button>
+      <span class="taskstate">${stateText}</span>
+    </div>
+    <div class="taskhint">「继续任务」= 对该书目执行 <code>novel-studio --pipeline --dir …</code>，从断点接着跑：规划没完成就补规划，规划完成了就推进下一章。一次 pipeline 通常只完成一章，需要更多就选连续执行。任务在服务器后台运行，关掉页面不会中断。</div>
+    ${log ? `<div class="tasklog">${log}</div>` : ""}
+    <div class="taskstate" id="task-msg">${esc(taskMessage)}</div>
+  </div></div>`;
+}
+
+$("#d-body").addEventListener("click", async e => {
+  const btn = e.target.closest && e.target.closest("[data-task-action]");
+  if (!btn || !currentDetail || btn.disabled) return;
+  e.preventDefault();
+  const action = btn.dataset.taskAction;
+  const runs = Number($("#task-runs") ? $("#task-runs").value : 1);
+  btn.disabled = true;
+  taskMessage = action === "stop" ? "正在停止…" : "正在启动…";
+  const msg = $("#task-msg");
+  if (msg) msg.textContent = taskMessage;
+  try {
+    const d = await postTask(currentDetail, action === "stop"
+      ? { action: "stop" }
+      : { action: "start", mode: btn.dataset.taskMode || "resume", runs });
+    taskMessage = d.error
+      ? `失败：${d.error}`
+      : action === "stop" ? "已发送停止信号" : `已启动（pid ${d.pid}），任务在服务器后台运行`;
+    loadTab(false);
+  } catch (err) {
+    taskMessage = `失败：${err.message}`;
+    const el = $("#task-msg");
+    if (el) el.textContent = taskMessage;
+    btn.disabled = false;
+  }
+});
 
 /* ---------- 抽屉驱动 ---------- */
 async function loadTab(keepScroll) {
@@ -1628,6 +1713,7 @@ function renderChapters(d) {
       ${tag(r)}
     </div>`).join("");
   return `
+    ${renderTaskBar(d.task)}
     <div class="sec">
       <h3>章节内容（共 ${rows.length} 章 · 已成稿 ${d.written || 0} · 草稿 ${d.drafts || 0} · 待写 ${d.planned || 0} · 正文合计 ${fmtNum(d.total_words || 0)} 字）</h3>
       <div class="panel chlist">${items}</div>
@@ -1726,6 +1812,7 @@ document.addEventListener("keydown", e => {
 
 function switchTab(tab) {
   currentTab = tab;
+  taskMessage = "";
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   $("#d-body").innerHTML = '<div class="loading">加载中…</div>';
   loadTab(false);

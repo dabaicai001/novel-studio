@@ -10,12 +10,15 @@ Go 侧健康检查依赖 /api/health 与 /api/novels 均返回 2xx。
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import time
 import urllib.parse
@@ -1779,6 +1782,7 @@ def run_detail(run: Path) -> dict:
     base.update({
         "chapters": chapters,
         "planned": planned,
+        "task": task_payload(run),
         "per_agent": per_agent,
         "deliveries": deliveries,
         "position": position,
@@ -2505,6 +2509,7 @@ def chapters_payload(run: Path) -> dict:
         "total_words": sum(int(r["words"] or 0) for r in rows if r["source"] == "chapters"),
         "current_chapter": int_value(base.get("current_chapter")),
         "total_chapters": int_value(base.get("chapters_total")),
+        "task": task_payload(run),
     }
 
 
@@ -2548,6 +2553,221 @@ def chapter_payload(run: Path, ch: int) -> dict | None:
         "rewrite_backup": (nd / "chapters" / f"{ch:02d}.md.pre-rewrite.md").is_file(),
         "has_draft": ch in draft_files(nd),
     }
+
+
+# ---------- 继续任务（写动作，默认关闭） ----------
+
+# 看板默认只读。允许从页面「继续任务」需要显式开启：
+#   NOVEL_STUDIO_DASHBOARD_ALLOW_WRITE=1
+# 该端口若暴露到公网，务必在外层做鉴权（例如 nginx basic auth），
+# 因为一次点击会真实调用模型并产生费用。
+WRITE_ENABLED = os.environ.get("NOVEL_STUDIO_DASHBOARD_ALLOW_WRITE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# 任务状态与日志放在看板自己的运行目录，不污染书目工程目录。
+JOBS_DIR = Path(os.environ.get(
+    "NOVEL_STUDIO_DASHBOARD_JOBS_DIR",
+    str(Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".novel-studio")) / "dashboard-jobs"),
+))
+
+# 继续任务时可选的阶段集合：留空 = 引擎默认阶段（自动从断点续跑）。
+TASK_STAGES = {
+    "resume": [],                                                          # 默认：architect→…→render，断点续跑
+    "plan": ["--stages", "architect,outline-all,zero-init"],               # 只补规划/初始化
+    "render": ["--stages", "preplan,project-all,seal,promote,render"],     # 只推进正文
+}
+TASK_LOG_LINES = 14
+
+
+def cli_path() -> str:
+    """引擎可执行文件：显式指定 > PATH 查找（systemd 单元里 PATH 已前置 /opt/novel-studio/bin）。"""
+    return os.environ.get("NOVEL_STUDIO_BIN") or shutil.which("novel-studio") or "novel-studio"
+
+
+def task_shell() -> str:
+    """执行任务脚本的 shell；生产为 /bin/sh，非 POSIX 平台可用环境变量覆盖以便本地联调。"""
+    return os.environ.get("NOVEL_STUDIO_DASHBOARD_SH") or "/bin/sh"
+
+
+def terminate_group(pid: int) -> None:
+    """优先终止整个进程组（任务脚本 + 其子进程）。"""
+    if hasattr(os, "killpg"):
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    else:  # 非 POSIX 平台（仅本地联调）没有进程组语义
+        os.kill(pid, signal.SIGTERM)
+
+
+def tail_text(path, lines: int = TASK_LOG_LINES) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return [ln.rstrip("\r\n") for ln in f.read().splitlines()[-lines:]]
+    except OSError:
+        return []
+
+
+def _job_file(run: Path) -> Path:
+    return JOBS_DIR / f"{run.name}.json"
+
+
+def _done_file(run: Path) -> Path:
+    return JOBS_DIR / f"{run.name}.done"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        # 权限不足或平台差异时无法判定：按存活处理，避免把正在跑的任务误报成已结束。
+        return getattr(exc, "errno", None) != errno.ESRCH
+    return True
+
+
+def task_payload(run: Path) -> dict:
+    """当前书目「继续任务」的状态：进行中 / 刚结束 / 空闲。"""
+    job = read_json(_job_file(run))
+    job = job if isinstance(job, dict) else {}
+    pid = int_value(job.get("pid"))
+    alive = _pid_alive(pid)
+    finished = None
+    try:
+        raw = _done_file(run).read_text(encoding="utf-8").strip()
+    except OSError:
+        raw = ""
+    if raw:
+        parts = raw.split(maxsplit=1)
+        finished = {"exit_code": int_value(parts[0]), "at": parts[1] if len(parts) > 1 else ""}
+    # 结束标记优先：pid 可能已被系统回收复用，标记才是权威收尾证据。
+    if finished is not None:
+        state = "finished"
+    elif alive:
+        state = "running"
+    elif job:
+        state = "stopped"
+    else:
+        state = "idle"
+    log_path = str(job.get("log") or "")
+    return {
+        "enabled": WRITE_ENABLED,
+        "state": state,
+        "pid": pid if alive else 0,
+        "mode": str(job.get("mode") or ""),
+        "runs": int_value(job.get("runs"), 1) if "runs" in job else int_value(job.get("target_runs"), 1),
+        "started_at": str(job.get("started_at") or ""),
+        "finished": finished,
+        "log": log_path,
+        "log_tail": tail_text(log_path) if log_path else [],
+    }
+
+
+def task_start(run: Path, mode: str = "resume", runs: int = 1) -> tuple[dict, int]:
+    """在后台启动/续跑 pipeline。返回 (payload, http_code)。"""
+    if not WRITE_ENABLED:
+        return {"error": "看板的「继续任务」未开启：需 NOVEL_STUDIO_DASHBOARD_ALLOW_WRITE=1"}, 403
+    stages = TASK_STAGES.get(mode)
+    if stages is None:
+        return {"error": f"未知模式 {mode!r}（可选：{'/'.join(TASK_STAGES)}）"}, 400
+    current = task_payload(run)
+    if current["state"] == "running":
+        return {"error": f"这本书的任务已在运行（pid {current['pid']}）"}, 409
+    nd = novel_dir(run)
+    if not (nd / "meta").is_dir():
+        return {"error": "不是有效的书目目录"}, 400
+    runs = max(1, min(int_value(runs, 1), 200))
+
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    log_path = JOBS_DIR / f"{run.name}-{stamp}.log"
+    runner = JOBS_DIR / f"{run.name}-{stamp}.sh"
+    done_path = _done_file(run)
+    try:
+        done_path.unlink()
+    except OSError:
+        pass
+
+    binary = cli_path()
+    project_root = nd.parent.parent
+    stage_args = " ".join(shlex.quote(s) for s in stages)
+    # 所有退出路径都要写结束标记，否则看板无法区分「正常结束」与「异常死掉」。
+    script = f"""#!/bin/sh
+# 由 novel-studio 看板生成（{stamp}）：继续任务 {mode} × {runs}
+DONE={shlex.quote(str(done_path))}
+finish() {{
+  echo "$1 $(date -Is)" > "$DONE" 2>/dev/null || echo "$1" > "$DONE"
+}}
+cd {shlex.quote(str(project_root))} || {{
+  echo "[dashboard] 无法进入项目目录 {project_root}"
+  finish 2
+  exit 2
+}}
+i=0
+while [ "$i" -lt {runs} ]; do
+  i=$((i+1))
+  echo "===== 第 $i/{runs} 次继续任务 · {stamp} ====="
+  {shlex.quote(binary)} --pipeline --dir {shlex.quote(str(run))} {stage_args}
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    echo "[dashboard] 第 $i 次退出码 $code，停止后续执行（可在看板再次点「继续任务」从断点续跑）"
+    finish "$code"
+    exit "$code"
+  fi
+done
+echo "[dashboard] 已执行 {runs} 次继续任务，全部成功"
+finish 0
+"""
+    # 必须用 \n 写入：脚本会交给 POSIX shell 执行，CRLF 会让 shebang/命令带上 \r 而静默失败。
+    with open(runner, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(script)
+    runner.chmod(0o700)
+    try:
+        logf = open(log_path, "ab")
+    except OSError as exc:
+        return {"error": f"无法写入任务日志：{exc}"}, 500
+    try:
+        proc = subprocess.Popen(
+            [task_shell(), str(runner)],
+            cwd=str(project_root),
+            stdin=subprocess.DEVNULL,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        logf.close()
+        return {"error": f"无法启动任务：{exc}"}, 500
+    logf.close()
+
+    _job_file(run).write_text(json.dumps({
+        "pid": proc.pid,
+        "mode": mode,
+        "runs": runs,
+        "started_at": iso_time(time.time()),
+        "log": str(log_path),
+        "script": str(runner),
+        "binary": binary,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "pid": proc.pid, "log": str(log_path), "state": "running",
+            "task": task_payload(run)}, 200
+
+
+def task_stop(run: Path) -> tuple[dict, int]:
+    if not WRITE_ENABLED:
+        return {"error": "看板的「继续任务」未开启：需 NOVEL_STUDIO_DASHBOARD_ALLOW_WRITE=1"}, 403
+    job = read_json(_job_file(run))
+    pid = int_value((job or {}).get("pid"))
+    if not _pid_alive(pid):
+        return {"error": "当前没有正在运行的任务"}, 409
+    try:
+        terminate_group(pid)
+    except OSError as exc:
+        return {"error": f"停止失败：{exc}"}, 500
+    try:
+        _done_file(run).write_text(f"143 {iso_time(time.time())} 用户在看板停止\n", encoding="utf-8")
+    except OSError:
+        pass
+    return {"ok": True, "pid": pid, "task": task_payload(run)}, 200
 
 
 # ---------- HTTP ----------
@@ -2616,6 +2836,39 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
         except Exception as exc:  # 看板永不 500 裸奔，返回结构化错误
+            return self._json({"error": str(exc)}, 500)
+
+
+    def do_POST(self):
+        path = urllib.parse.unquote(self.path.split("?", 1)[0])
+        try:
+            m = re.match(r"^/api/novels/([^/]+)/task$", path)
+            if not m:
+                return self._json({"error": "not found"}, 404)
+            # 浏览器会自动携带 basic auth，跨站表单也能命中本接口；
+            # 因此要求自定义头（表单无法伪造），避免被 CSRF 驱动花费模型调用。
+            if self.headers.get("X-Novel-Studio-Action") != "1":
+                return self._json({"error": "缺少 X-Novel-Studio-Action 头，拒绝写操作"}, 403)
+            length = int_value(self.headers.get("Content-Length"), 0)
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return self._json({"error": "请求体不是合法 JSON"}, 400)
+            run = RUNS_DIR / m.group(1)
+            if not is_run_dir(run) or run.parent != RUNS_DIR:
+                return self._json({"error": "not found"}, 404)
+            action = str(body.get("action") or "").strip()
+            if action == "start":
+                payload, code = task_start(run, str(body.get("mode") or "resume"), int_value(body.get("runs"), 1))
+            elif action == "stop":
+                payload, code = task_stop(run)
+            else:
+                payload, code = {"error": f"不支持的动作 {action!r}（可选 start/stop）"}, 400
+            return self._json(payload, code)
+        except BrokenPipeError:
+            pass
+        except Exception as exc:
             return self._json({"error": str(exc)}, 500)
 
 
