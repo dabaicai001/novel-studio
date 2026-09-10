@@ -83,11 +83,34 @@ func verifyPipelineOutlineAllReceiptAndArtifactsWithControlHeld(outputDir string
 		return nil, err
 	}
 	resolved, err := domain.ResolveBookScaleTarget(compass.EstimatedScale, 0, 0)
-	if err != nil || resolved.Range != target.Range ||
-		resolved.TargetVolumes != target.TargetVolumes || resolved.TargetChapters != target.TargetChapters ||
-		resolved.TargetWords != target.TargetWords || resolved.TargetWordsPerChapter != target.TargetWordsPerChapter ||
-		resolved.StoryTimeHint != target.StoryTimeHint {
+	if err != nil || resolved.Range != target.Range || resolved.StoryTimeHint != target.StoryTimeHint {
 		return nil, fmt.Errorf("outline-all deterministic scale target drift")
+	}
+	switch {
+	case receipt.StructurePlan != nil:
+		// After plan_structure the deterministic totals are the frozen skeleton's
+		// totals, not the compass midpoint: freezePipelineOutlineAllStructurePlan
+		// rebinds TargetVolumes/TargetChapters/TargetWordsPerChapter to the
+		// model-chosen plan, and applyFrozenStructurePlanTarget hands exactly
+		// those values to every later validator. Comparing them against the
+		// midpoint instead rejects every book whose chosen scale differs from it
+		// (compass "5-6卷，约 110-160 章" yields midpoint 6/135 while the frozen
+		// plan is 5/114), i.e. a fully published outline fails final verification.
+		if receipt.TargetVolumes != receipt.StructurePlan.TotalVolumes() ||
+			receipt.TargetChapters != receipt.StructurePlan.TotalChapters() {
+			return nil, fmt.Errorf("outline-all frozen structure plan target drift")
+		}
+		if receipt.TargetWords > 0 && receipt.TargetChapters > 0 {
+			wantWordsPerChapter := (receipt.TargetWords + receipt.TargetChapters/2) / receipt.TargetChapters
+			if receipt.TargetWordsPerChapter != wantWordsPerChapter {
+				return nil, fmt.Errorf("outline-all frozen structure plan words-per-chapter drift")
+			}
+		}
+	default:
+		if resolved.TargetVolumes != target.TargetVolumes || resolved.TargetChapters != target.TargetChapters ||
+			resolved.TargetWords != target.TargetWords || resolved.TargetWordsPerChapter != target.TargetWordsPerChapter {
+			return nil, fmt.Errorf("outline-all deterministic scale target drift")
+		}
 	}
 	volumes, err := validatePipelineOutlineAllFinal(st, *compass, target)
 	if err != nil {
