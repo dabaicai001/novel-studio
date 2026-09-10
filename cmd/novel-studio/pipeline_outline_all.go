@@ -326,6 +326,16 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 		if receipt.Status == domain.OutlineAllExecutionComplete {
 			break
 		}
+		// The frozen structure plan owns the exact volume/chapter totals, while
+		// the in-memory target still holds the compass midpoint. Apply it before
+		// ANY path that rebuilds an operation's model-visible context: on resume
+		// the pending-action path below never reaches the later overlay, so a new
+		// process would rebuild the context with the midpoint target (e.g. 6
+		// volumes/135 chapters instead of the frozen 5/114) and the whole attempt
+		// was rejected as "model-visible context drifted".
+		if receipt.StructurePlan != nil {
+			target = applyFrozenStructurePlanTarget(target, receipt)
+		}
 		receipt, err = refreshPipelineOutlineAllLeases(live, candidate, owner, modelDigest, receipt)
 		if err != nil {
 			return err
@@ -360,9 +370,6 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 				}
 			}
 			continue
-		}
-		if receipt.StructurePlan != nil {
-			target = applyFrozenStructurePlanTarget(target, receipt)
 		}
 		volumes, err := candidate.Outline.LoadLayeredOutline()
 		if err != nil {
