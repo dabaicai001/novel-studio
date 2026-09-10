@@ -241,10 +241,11 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 				continue
 			}
 			if r.Kind == "unsupported" || !executors[r.ActorRef] || r.RecipientRef != "" && !actors[r.RecipientRef] {
-				return fmt.Errorf("available capability %q requires existing character actors; background duties/recipients have no enabled execution adapter", r.Key)
+				return fmt.Errorf("available capability %q requires existing character actors; background duties/recipients have no enabled execution adapter（actor_ref 必须是当前角色观察名单里、且有执行适配器的正式角色；背景职务和背景人物不行。若该动作本就由背景人物完成，把本条 status 改成 missing 或 unclear 并留空这些 ID）", r.Key)
 			}
 			if (r.Kind == "communication" || r.Kind == "resource_delivery") != (r.RecipientRef != "") || r.RecipientRef == r.ActorRef {
-				return fmt.Errorf("communication/delivery requires an explicit distinct existing recipient, other actions cannot claim one")
+				return fmt.Errorf("communication/delivery requires an explicit distinct existing recipient, other actions cannot claim one（kind=communication 或 resource_delivery 必须指定另一个已存在的正式角色作 recipient_ref；其他 kind 必须留空 recipient_ref。当前 kind=%s recipient_ref=%s actor_ref=%s）",
+					rehearsalCapabilityDiagnosticValueV1(r.Kind), rehearsalCapabilityDiagnosticValueV1(r.RecipientRef), rehearsalCapabilityDiagnosticValueV1(r.ActorRef))
 			}
 			if r.Kind != "artifact_write" && len(r.MaterialInputs) != 0 {
 				return fmt.Errorf("only future artifact creation allocates materials")
@@ -260,23 +261,23 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 			switch r.Kind {
 			case "surface_inspection":
 				if !single || !HasInspectableSurfaceV1(resource, r.Surface) || len(r.MechanismRefs) == 0 {
-					return fmt.Errorf("surface_inspection requires one existing resource's declared inspectable surface and a public mechanism; no current condition or permission is inferred")
+					return fmt.Errorf("surface_inspection requires one existing resource's declared inspectable surface and a public mechanism; no current condition or permission is inferred（需要恰好一个 resource_refs 指向已声明 inspectable_surfaces 的现有资源，surface 取其中一项，并给公开 mechanism_refs；没有声明过的表面不能用这个 kind，改用 missing/unclear）")
 				}
 			case "resource_read":
 				if !single || resource.Artifact != nil || len(resource.ReadableFacts) == 0 || !m.RequiresReadable {
-					return fmt.Errorf("resource_read requires one existing readable document and requires_readable=true")
+					return fmt.Errorf("resource_read requires one existing readable document and requires_readable=true（需要恰好一个 resource_refs 指向带 readable_facts 的现有文书，且本材料 requires_readable=true。若这条其实只是本人默诵或内化，改用 kind=self_work）")
 				}
 			case "resource_measurement":
 				if !single || resource.Unit == "" || resource.ActualAmount == nil || len(r.MechanismRefs) == 0 {
-					return fmt.Errorf("resource_measurement requires an existing numeric target and public mechanism; a ruler name or mechanism alone is not a target")
+					return fmt.Errorf("resource_measurement requires an existing numeric target and public mechanism; a ruler name or mechanism alone is not a target（需要恰好一个 resource_refs 指向带单位与实际数量的现有资源，并给公开 mechanism_refs。没有数值目标的定性资源请改用 kind=operational_observation）")
 				}
 			case "operational_observation":
 				if !single || !operationalResourceV1(resource) || len(r.MechanismRefs) == 0 {
-					return fmt.Errorf("operational_observation requires one existing qualitative non-document resource and public mechanism; it cannot certify quantities or overall safety")
+					return fmt.Errorf("operational_observation requires one existing qualitative non-document resource and public mechanism; it cannot certify quantities or overall safety（该 kind 只用于对 world_state.resources 里已存在的**定性非文书**资源做局部可用性观察：需要恰好一个 resource_refs 指向该资源 + 至少一个公开 mechanism_refs。若这里其实是角色之间打听、通报或传话，改用 kind=communication 并指定另一个正式角色为 recipient_ref；若是主角自身动作或内心活动，改用 kind=self_work；若要给出数值、数量或整体安全结论，本 kind 不成立，请把本条 status 改成 missing/unclear 并留空目标）")
 				}
 			case "resource_use":
 				if len(r.ResourceRefs) == 0 {
-					return fmt.Errorf("resource_use requires existing physical inputs")
+					return fmt.Errorf("resource_use requires existing physical inputs（需要至少一个现有 resource_id 作为实际使用对象；若没有实体输入，改用 kind=self_work）")
 				}
 			case "self_work", "communication":
 				// Only an own task's execution or a sourced report/request, not

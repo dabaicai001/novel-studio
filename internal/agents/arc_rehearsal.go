@@ -224,7 +224,25 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 	}
 	var runErr error
 	var lastToolError error
-	events := agentcore.AgentLoop(ctx, []agentcore.AgentMessage{inputMessage}, agentcore.AgentContext{SystemPrompt: prompt, Tools: []agentcore.Tool{tool}}, agentcore.LoopConfig{Model: model, OnMessage: onMessage, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns(role, arcRehearsalMaxTurns), arcRehearsalMaxTurns), MaxRetries: subagentMaxRetries, MaxToolErrors: 0, ToolsAreIdempotent: false, ThinkingLevel: resolvedRoleThinking(snapshot.Model, cfg, role), StopAfterTool: func(name string) bool { return name == tool.Name() }})
+	// The model sometimes answers a rejection with prose instead of a corrected
+	// submission, which ends the agent loop and fails the stage with "returned
+	// without an actually submitted, usage-bound arc rehearsal". Measured: after a
+	// single rejection the next turn produced 484 output tokens and no tool call,
+	// while under the older messages the same role spent ten turns retrying. Steer
+	// it back onto the tool whenever a rejection is still unresolved.
+	var steeringMu sync.Mutex
+	pendingRetry := ""
+	takeSteering := func() []agentcore.AgentMessage {
+		steeringMu.Lock()
+		defer steeringMu.Unlock()
+		if pendingRetry == "" {
+			return nil
+		}
+		reminder := pendingRetry
+		pendingRetry = ""
+		return []agentcore.AgentMessage{agentcore.UserMsg(reminder)}
+	}
+	events := agentcore.AgentLoop(ctx, []agentcore.AgentMessage{inputMessage}, agentcore.AgentContext{SystemPrompt: prompt, Tools: []agentcore.Tool{tool}}, agentcore.LoopConfig{Model: model, OnMessage: onMessage, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns(role, arcRehearsalMaxTurns), arcRehearsalMaxTurns), MaxRetries: subagentMaxRetries, MaxToolErrors: 0, ToolsAreIdempotent: false, ThinkingLevel: resolvedRoleThinking(snapshot.Model, cfg, role), GetSteeringMessages: takeSteering, StopAfterTool: func(name string) bool { return name == tool.Name() }})
 	for event := range events {
 		if event.Type == agentcore.EventToolExecEnd && event.IsError {
 			message := []rune(string(event.Result))
@@ -232,6 +250,14 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 				message = message[:512]
 			}
 			lastToolError = fmt.Errorf("%s rehearsal submission rejected: %s", role, string(message))
+			steeringMu.Lock()
+			pendingRetry = fmt.Sprintf(
+				"报告尚未提交：上一轮 submit_arc_rehearsal 被宿主拒绝。\n宿主拒绝原因：%s\n"+
+					"不得用文字说明代替提交——必须再次调用 submit_arc_rehearsal，并在这一轮直接修正上面指出的问题。"+
+					"校验信息里已经给出 material_checks 索引、capability key、kind 以及可选的改法，照着改即可。",
+				string(message),
+			)
+			steeringMu.Unlock()
 			fmt.Fprintf(os.Stderr, "[pipeline:rehearse-arc:%s] 提交校验未通过：%q\n", role, string(message))
 		}
 		if event.Type == agentcore.EventError && event.Err != nil {
