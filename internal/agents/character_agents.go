@@ -1534,9 +1534,11 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 			return agentcore.StopDecision{Allow: true}
 		}
 		guardBlocks++
-		if guardBlocks >= 2 {
+		if guardBlocks > characterAgentReminderBudget {
+			fmt.Fprintf(os.Stderr, "[pipeline:character] %s 连续 %d 次未提交决定，升级终止本阶段\n", observation.AgentID, guardBlocks-1)
 			return agentcore.StopDecision{Escalate: true}
 		}
+		fmt.Fprintf(os.Stderr, "[pipeline:character] %s 尚未提交决定（第 %d/%d 次提醒）\n", observation.AgentID, guardBlocks, characterAgentReminderBudget)
 		return agentcore.StopDecision{InjectMessage: "尚未提交决定。现在只调用 submit_character_decision。"}
 	}
 	raw, _ := json.Marshal(observation)
@@ -1606,6 +1608,15 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 	return errors.Join(err, appendCharacterLoopUsage(st, usageRecord, usage, err, projectedAccounting(ctx).ImportCharacterUsage), projectedAccountingAfter(ctx))
 }
 
+// characterAgentReminderBudget is how many consecutive "you did not submit"
+// reminders a character agent or the chapter-world arbiter receives before its
+// StopGuard escalates. Escalation terminates the entire project-all run, so a
+// single retry is far too thin: measured, the arbiter submitted a full body, had
+// it rejected, answered twice with prose instead of a corrected submission, and
+// killed chapter 1 of 114. Three reminders match subagentMaxConsecutiveBlocks;
+// MaxTurns still bounds each loop.
+const characterAgentReminderBudget = 3
+
 func runCharacterAgentTerminalLoop(
 	ctx context.Context,
 	model agentcore.ChatModel,
@@ -1663,6 +1674,16 @@ func runCharacterAgentTerminalLoop(
 	diagnostics := newCharacterToolDiagnosticObserver(ctx, terminalTool, diagnosticStores)
 	for event := range events {
 		diagnostics.observe(event)
+		if event.Type == agentcore.EventToolExecEnd && event.IsError {
+			// Surface the rejection reason: without it a failed submission is
+			// indistinguishable from a model that simply stopped answering, and the
+			// stage error only says the guard escalated.
+			reason := []rune(string(event.Result))
+			if len(reason) > 300 {
+				reason = reason[:300]
+			}
+			fmt.Fprintf(os.Stderr, "[pipeline:character] %s 提交被拒：%q\n", terminalTool, string(reason))
+		}
 		if event.Type == agentcore.EventModelResponse {
 			switch message := event.Message.(type) {
 			case agentcore.Message:
@@ -1763,9 +1784,11 @@ func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.St
 			return agentcore.StopDecision{Allow: true}
 		}
 		guardBlocks++
-		if guardBlocks >= 2 {
+		if guardBlocks > characterAgentReminderBudget {
+			fmt.Fprintf(os.Stderr, "[pipeline:character] world_arbiter 连续 %d 次未完成裁决，升级终止本阶段\n", guardBlocks-1)
 			return agentcore.StopDecision{Escalate: true}
 		}
+		fmt.Fprintf(os.Stderr, "[pipeline:character] world_arbiter 尚未完成裁决（第 %d/%d 次提醒）\n", guardBlocks, characterAgentReminderBudget)
 		return agentcore.StopDecision{InjectMessage: "尚未完成裁决。现在只调用 resolve_chapter_world。"}
 	}
 	arbiterPrompt, userPrompt, executionTool, err := prepareCharacterArbitrationRequest(inputs, proposals, tool)
