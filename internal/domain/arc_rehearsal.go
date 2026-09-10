@@ -177,12 +177,37 @@ func ValidateArcRehearsalBody(input ArcRehearsalInput, body ArcRehearsalBody) er
 	if err := validateArcRehearsalCapabilitiesV1(input, body); err != nil {
 		return err
 	}
-	if strings.TrimSpace(body.Summary) == "" || len(body.Chapters) != len(input.Outline) || len(body.MaterialChecks) == 0 {
-		return fmt.Errorf("rehearsal requires a substantive conditional forecast for the whole arc and explicit material checks")
+	// Each rejection below names the exact offending entry and, where the host
+	// owns the expected bytes, prints them. The previous single-sentence messages
+	// ("...must preserve each current goal and mark choices conditional") covered
+	// four different mistakes at once, so the Architect could not tell whether the
+	// character name, the verbatim current_goal copy, conflicts or
+	// conditional_choices was wrong and burned every MaxTurns retry (measured:
+	// 4/4 turns rejected on the first arc rehearsal).
+	if strings.TrimSpace(body.Summary) == "" {
+		return fmt.Errorf("rehearsal requires a substantive conditional forecast for the whole arc: summary 不能为空")
+	}
+	if len(body.Chapters) != len(input.Outline) {
+		return fmt.Errorf("rehearsal chapters 必须按顺序覆盖整弧全部章位：got=%d want=%d（本弧第 %d-%d 章）", len(body.Chapters), len(input.Outline), input.ArcFirstChapter, input.ArcFirstChapter+len(input.Outline)-1)
+	}
+	if len(body.MaterialChecks) == 0 {
+		return fmt.Errorf("rehearsal requires explicit material checks: material_checks 不能为空")
 	}
 	for i, chapter := range body.Chapters {
-		if chapter.Chapter != input.ArcFirstChapter+i || strings.TrimSpace(chapter.ConditionalForecast) == "" || len(nonEmptyWorldStrings(chapter.Assumptions)) == 0 || len(nonEmptyWorldStrings(chapter.CausalLinks)) == 0 || len(nonEmptyWorldStrings(chapter.TimeResourceChecks)) == 0 {
-			return fmt.Errorf("rehearsal chapter %d lacks explicit conditions, causal links or time/resource checks", chapter.Chapter)
+		if chapter.Chapter != input.ArcFirstChapter+i {
+			return fmt.Errorf("rehearsal chapters[%d].chapter=%d 必须等于 %d（按顺序覆盖整弧）", i, chapter.Chapter, input.ArcFirstChapter+i)
+		}
+		if strings.TrimSpace(chapter.ConditionalForecast) == "" {
+			return fmt.Errorf("rehearsal chapter %d lacks conditional_forecast：已接受章逐字复制原摘要，未来章写条件预测，不能留空", chapter.Chapter)
+		}
+		if len(nonEmptyWorldStrings(chapter.Assumptions)) == 0 {
+			return fmt.Errorf("rehearsal chapter %d lacks assumptions：列出条件假设，不得伪称已执行", chapter.Chapter)
+		}
+		if len(nonEmptyWorldStrings(chapter.CausalLinks)) == 0 {
+			return fmt.Errorf("rehearsal chapter %d lacks causal_links：列出假设下的因果关系", chapter.Chapter)
+		}
+		if len(nonEmptyWorldStrings(chapter.TimeResourceChecks)) == 0 {
+			return fmt.Errorf("rehearsal chapter %d lacks time_resource_checks：列出时间资源限制与未决条件", chapter.Chapter)
 		}
 		if chapter.Chapter <= input.BaseCanonChapter {
 			for _, summary := range input.AcceptedSummaries {
@@ -195,44 +220,73 @@ func ValidateArcRehearsalBody(input ArcRehearsalInput, body ArcRehearsalBody) er
 		}
 	}
 	characters := map[string]string{}
+	observed := make([]string, 0, len(input.CharacterObservations))
 	for _, o := range input.CharacterObservations {
 		characters[o.Character] = o.CurrentGoal
+		observed = append(observed, o.Character)
 	}
 	for _, c := range body.CharacterConflicts {
 		goal, ok := characters[c.Character]
-		if !ok || c.CurrentGoal != goal || len(nonEmptyWorldStrings(c.Conflicts)) == 0 || len(nonEmptyWorldStrings(c.ConditionalChoices)) == 0 {
-			return fmt.Errorf("rehearsal character conflicts must preserve each current goal and mark choices conditional")
+		if !ok {
+			return fmt.Errorf("rehearsal character_conflicts 里的角色 %q 不在宿主当前观察名单中；角色名必须逐字一致，只能是 %s", c.Character, strings.Join(observed, "、"))
+		}
+		if c.CurrentGoal != goal {
+			return fmt.Errorf("rehearsal character_conflicts[%q].current_goal 必须逐字复制宿主观察到的当前目标：expected=%q actual=%q", c.Character, goal, c.CurrentGoal)
+		}
+		if len(nonEmptyWorldStrings(c.Conflicts)) == 0 {
+			return fmt.Errorf("rehearsal character_conflicts[%q].conflicts 不能为空：列出该角色的目标冲突", c.Character)
+		}
+		if len(nonEmptyWorldStrings(c.ConditionalChoices)) == 0 {
+			return fmt.Errorf("rehearsal character_conflicts[%q].conditional_choices 不能为空：写条件性可能行为，不是正式决定", c.Character)
 		}
 		delete(characters, c.Character)
 	}
 	if len(characters) != 0 {
-		return fmt.Errorf("rehearsal omitted a current principal character")
+		var missing []string
+		for _, name := range observed {
+			if goal, ok := characters[name]; ok {
+				missing = append(missing, fmt.Sprintf("%s（current_goal=%q）", name, goal))
+			}
+		}
+		return fmt.Errorf("rehearsal omitted a current principal character：每个宿主观察角色都必须逐条出现在 character_conflicts 中，缺 %s", strings.Join(missing, "、"))
 	}
 	contracts := map[string]bool{}
 	for _, text := range input.HardContracts {
 		contracts[text] = true
 	}
 	for _, c := range body.ContractChecks {
-		if !contracts[c.Contract] || len(nonEmptyWorldStrings(c.Conditions)) == 0 {
-			return fmt.Errorf("rehearsal contract checks must cover exact input contracts with conditions")
+		if !contracts[c.Contract] {
+			return fmt.Errorf("rehearsal contract_checks 的 contract 字段必须逐字复制输入 hard_contracts 原文，%q 不在其中（本弧 hard_contracts 第一条为 %q）", c.Contract, outlineContractTextPrefix(input.HardContracts[0], 80))
+		}
+		if len(nonEmptyWorldStrings(c.Conditions)) == 0 {
+			return fmt.Errorf("rehearsal contract_checks[%q].conditions 不能为空：列出判断所需条件与依据", outlineContractTextPrefix(c.Contract, 60))
 		}
 		switch c.Assessment {
 		case "plausible", "conditional", "unresolved", "infeasible_prediction":
 		default:
-			return fmt.Errorf("invalid speculative contract assessment")
+			return fmt.Errorf("invalid speculative contract assessment %q（可选 plausible/conditional/unresolved/infeasible_prediction）", c.Assessment)
 		}
 		delete(contracts, c.Contract)
 	}
 	if len(contracts) != 0 {
-		return fmt.Errorf("rehearsal omitted a hard contract")
+		var missing []string
+		for _, text := range input.HardContracts {
+			if contracts[text] {
+				missing = append(missing, outlineContractTextPrefix(text, 60))
+			}
+		}
+		return fmt.Errorf("rehearsal omitted a hard contract：每条 hard_contract 都必须出现在 contract_checks 中，缺 %s", strings.Join(missing, "；"))
 	}
 	resources := map[string]WorldResourceBalanceV2{}
 	for _, r := range input.WorldState.Resources {
 		resources[r.ResourceID] = r
 	}
-	for _, m := range body.MaterialChecks {
-		if strings.TrimSpace(m.Operation) == "" || strings.TrimSpace(m.Explanation) == "" {
-			return fmt.Errorf("material checks require a named operation and a source-gap explanation")
+	for i, m := range body.MaterialChecks {
+		if strings.TrimSpace(m.Operation) == "" {
+			return fmt.Errorf("rehearsal material_checks[%d].operation 不能为空：写关键操作名", i)
+		}
+		if strings.TrimSpace(m.Explanation) == "" {
+			return fmt.Errorf("rehearsal material_checks[%q].explanation 不能为空：写来源、可读事实与真实缺口", m.Operation)
 		}
 		switch m.Status {
 		case "available", "missing", "unclear", "not_required":

@@ -30,6 +30,17 @@ requires_readable=true的resource_refs只引用实际读取的既有文书或已
 
 const arcRehearsalReviewPrompt = "\n你是复核者：独立检查Architect草案，不因已有草案便同意。保留每个material_checks.operation及读取依赖，可新增遗漏操作。资料缺口未解决时明确missing/unclear，不伪造可行性或把预测不通当实际世界冲突。"
 
+// arcRehearsalMaxTurns bounds submission attempts for the whole-arc rehearsal
+// report. That report is a single large, tightly validated body (per-chapter
+// conditions plus character conflicts, contract checks, and material checks
+// carrying capability requirements), and one rejection typically exposes only
+// one of several independent defects — the submit tool stops at the first
+// violation. With a ceiling of 4 the Architect ran out while still repairing
+// distinct fields (measured on the first arc: 2 capability rejections, then 2
+// character-conflict rejections, then "max turns (4) reached"). Keep the ceiling
+// configurable downward, never upward.
+const arcRehearsalMaxTurns = 8
+
 func ArcRehearsalProtocolDigest() (string, error) {
 	tool := &submitArcRehearsalTool{}
 	digest, err := domain.DeterministicPlanningHash(struct {
@@ -196,7 +207,7 @@ func runArcRehearsalStage(ctx context.Context, cfg bootstrap.Config, models *boo
 	}
 	var runErr error
 	var lastToolError error
-	events := agentcore.AgentLoop(ctx, []agentcore.AgentMessage{inputMessage}, agentcore.AgentContext{SystemPrompt: prompt, Tools: []agentcore.Tool{tool}}, agentcore.LoopConfig{Model: model, OnMessage: onMessage, MaxTurns: 4, MaxRetries: subagentMaxRetries, MaxToolErrors: 0, ToolsAreIdempotent: false, ThinkingLevel: resolvedRoleThinking(snapshot.Model, cfg, role), StopAfterTool: func(name string) bool { return name == tool.Name() }})
+	events := agentcore.AgentLoop(ctx, []agentcore.AgentMessage{inputMessage}, agentcore.AgentContext{SystemPrompt: prompt, Tools: []agentcore.Tool{tool}}, agentcore.LoopConfig{Model: model, OnMessage: onMessage, MaxTurns: cappedMaxTurns(cfg.ResolveMaxTurns(role, arcRehearsalMaxTurns), arcRehearsalMaxTurns), MaxRetries: subagentMaxRetries, MaxToolErrors: 0, ToolsAreIdempotent: false, ThinkingLevel: resolvedRoleThinking(snapshot.Model, cfg, role), StopAfterTool: func(name string) bool { return name == tool.Name() }})
 	for event := range events {
 		if event.Type == agentcore.EventToolExecEnd && event.IsError {
 			message := []rune(string(event.Result))
