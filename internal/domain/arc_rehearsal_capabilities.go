@@ -166,15 +166,18 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 	allocated := map[string]float64{}
 	for i, m := range body.MaterialChecks {
 		materialIndex, requirementIndex = i, -1
-		if operations[m.Operation] || len(m.CapabilityRequirements) > 16 {
-			return fmt.Errorf("material operations must be unique with at most 16 capability dependencies")
+		if operations[m.Operation] {
+			return fmt.Errorf("material_checks[%d] 的 operation %q 与更早的条目重复：每个 operation 字符串在本报告内只能出现一次", i, m.Operation)
+		}
+		if len(m.CapabilityRequirements) > 16 {
+			return fmt.Errorf("material_checks[%d] %q 声明了 %d 条 capability_requirements，上限 16 条", i, m.Operation, len(m.CapabilityRequirements))
 		}
 		operations[m.Operation] = true
 		if m.Status == "available" && len(m.CapabilityRequirements) == 0 {
 			return fmt.Errorf("available operation %q needs explicit executable capability dependencies; mechanism prose is not an observation/recipient API", m.Operation)
 		}
 		if m.Status == "not_required" && (len(m.CapabilityRequirements) != 0 || len(m.ResourceRefs) != 0) {
-			return fmt.Errorf("not_required cannot hide declared capability dependencies")
+			return fmt.Errorf("material_checks[%d] %q：status=not_required 时 capability_requirements 与 resource_refs 必须都为空（当前 %d 条依赖、%d 个 resource_refs）。两种改法任选其一——保留依赖并把 status 改成 available/missing/unclear，或者删掉全部依赖继续用 not_required", i, m.Operation, len(m.CapabilityRequirements), len(m.ResourceRefs))
 		}
 		covered := map[string]bool{}
 		readDependency := false
@@ -184,7 +187,18 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 				return fmt.Errorf("surface requires the surface-enabled profile and an explicit exterior inspection, not contents, quantities or permission")
 			}
 			if !rehearsalCapabilityKeyV1(r.Key) || prior[r.Key].value.Key != "" || len(prior) >= 128 || len(r.DependsOn) > 16 || len(r.ResourceRefs) > 16 || len(r.MechanismRefs) > 16 || len(r.MaterialInputs) > 16 {
-				return fmt.Errorf("capability dependency has duplicate, invalid or unbounded identity")
+				reason := "key 必须是非空短名，且在整份报告内唯一"
+				switch {
+				case !rehearsalCapabilityKeyV1(r.Key):
+					reason = "key 非法：必须是非空短名（不是 resource_id）"
+				case prior[r.Key].value.Key != "":
+					reason = "key 与更早的一条 capability_requirement 重复；每个 key 只能出现一次"
+				case len(prior) >= 128:
+					reason = "本报告声明的 capability_requirement 总数已达 128 上限"
+				default:
+					reason = "depends_on / resource_refs / mechanism_refs / material_inputs 之一超过 16 项上限"
+				}
+				return fmt.Errorf("material_checks[%d] %q 的 capability_requirement key=%s 不合法：%s", i, m.Operation, rehearsalCapabilityDiagnosticValueV1(r.Key), reason)
 			}
 			if r.Kind != "unsupported" && !slices.Contains(input.ExecutionCapabilities.ActionKinds, r.Kind) {
 				return fmt.Errorf("capability %q is not supported by the frozen execution profile", r.Kind)
@@ -327,7 +341,7 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 			}
 			for _, id := range m.ResourceRefs {
 				if !covered[id] {
-					return fmt.Errorf("material resource %q lacks an executable dependency", id)
+					return fmt.Errorf("material_checks[%d] %q: material resource %q lacks an executable dependency——resource_refs 里列出的每个 resource_id 都必须由本材料的至少一条 capability_requirement 引用（如 kind=resource_read / resource_measurement / operational_observation）；请补上引用该 id 的依赖，或从 resource_refs 中删掉它", i, m.Operation, id)
 				}
 			}
 		}
