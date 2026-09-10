@@ -94,6 +94,10 @@ func (s *stream) Next() (litellm.Event, error) {
 		return nil, litellm.NewNetworkError(s.spec.providerName(), "stream read error", err)
 	}
 	s.done = true
+	if s.spec.Stream.DoneSentinelOptional {
+		// 端点不发送 done 哨兵,以 EOF 作为正常收尾。
+		return litellm.DoneEvent{FinishReason: s.finish, Provider: s.spec.providerName(), Model: s.model}, nil
+	}
 	return nil, litellm.NewProviderError(s.spec.providerName(), litellm.ErrorTypeProvider, fmt.Sprintf("%s: stream ended before %s", s.spec.providerName(), s.spec.doneSentinel()))
 }
 

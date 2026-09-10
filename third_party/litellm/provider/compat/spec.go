@@ -73,6 +73,11 @@ type RequestSpec struct {
 	Messages        MessageMapper
 	Tools           ToolMapper
 
+	// ReasoningHistoryField 指定历史消息里回填“推理文本”的字段名。
+	// 缺省用 Response.ReasoningFields[0]；当该字段是数组型(如 MiniMax 的
+	// reasoning_details)时,纯文本必须写进字符串型字段,否则会被端点拒收。
+	ReasoningHistoryField string
+
 	AllowUnknownProviderOptions bool
 	AllowedProviderOptions      map[string]struct{}
 }
@@ -96,6 +101,9 @@ type StreamSpec struct {
 	ContentCumulative          bool
 	ContentCumulativeCondition string
 	DoneSentinel               string
+	// DoneSentinelOptional 为 true 时,流在未收到 done 哨兵就以 EOF 结束时
+	// 按正常收尾处理(部分兼容端点,如 MiniMax 国内 API,不发 [DONE])。
+	DoneSentinelOptional bool
 
 	OmitStreamOptions bool
 }

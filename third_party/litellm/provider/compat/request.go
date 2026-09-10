@@ -275,7 +275,13 @@ func putReasoningBlock(out map[string]any, block litellm.ReasoningBlock, spec Sp
 		return nil
 	}
 	if block.Text != "" {
-		out[field] = block.Text
+		// 推理文本必须写进字符串型字段:部分端点(如 MiniMax)的首个推理字段
+		// 是数组型(reasoning_details),把字符串写进去会被服务端 400 拒收。
+		textField := field
+		if spec.Request.ReasoningHistoryField != "" {
+			textField = spec.Request.ReasoningHistoryField
+		}
+		out[textField] = block.Text
 		return nil
 	}
 	if block.Signature != "" || len(block.Redacted) > 0 {

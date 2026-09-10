@@ -30,6 +30,10 @@ func New(cfg Config) (*compat.Provider, error) {
 			Thinking:               mapThinking,
 			ProviderOptions:        mapProviderOptions,
 			AllowedProviderOptions: allowedProviderOptions,
+			// 2026-09-10: MiniMax 的 reasoning_details 是数组型字段,历史推理文本
+			// 必须写进字符串型的 reasoning_content,否则服务端返回
+			// "Mismatch type []*open_platform_oai.ReasoningDetail"。
+			ReasoningHistoryField: "reasoning_content",
 		},
 		Response: compat.ResponseSpec{
 			ModelFromResponse:         true,
@@ -37,10 +41,18 @@ func New(cfg Config) (*compat.Provider, error) {
 			HasCompletionTokenDetails: true,
 		},
 		Stream: compat.StreamSpec{
-			ReasoningFields:            []string{"reasoning_details", "reasoning_content"},
-			ReasoningCumulative:        true,
-			ContentCumulative:          true,
-			ContentCumulativeCondition: "thinking_enabled",
+			ReasoningFields: []string{"reasoning_details", "reasoning_content"},
+			// 2026-09-10: 现行 MiniMax M2/M3 模型在国内端点(api.minimax.cn /
+			// api.minimaxi.com)上的 reasoning_content 与 content 都是增量 delta,
+			// 不再是老型号(minimax-text-01)时代的累积全量；上游原本声明的
+			// ReasoningCumulative/ContentCumulative=true 会让 every 多 chunk 流
+			// 触发 "cumulative ... stream changed unexpectedly" 并重试至失败。
+			// 这里按实测行为关闭累积解析(实测见本仓库部署记录)。
+			//
+			// 2026-09-10: MiniMax 国内端点(api.minimax.cn)的 SSE 流以
+			// finish_reason:"stop" 结束,不发送 "data: [DONE]" 哨兵,
+			// 故允许以 EOF 正常收尾。
+			DoneSentinelOptional: true,
 		},
 		Capabilities: func(model string, caps litellm.Capabilities) litellm.Capabilities {
 			caps.Thinking.Efforts = nil
