@@ -364,13 +364,31 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 	report.BaseCanonChapter, report.BaseCanonRoot, report.SourceRoot = input.BaseCanonChapter, input.BaseCanonRoot, input.SourceRoot
 	report.InputDigest, report.DraftDigest = input.InputDigest, draft.DraftDigest
 	report.ReadyForDetail = true
+	// Only known-impossible outcomes block detailed planning.
+	//
+	// Contract `unresolved` and material `unclear` are decisively NOT blocking
+	// here. Every arc's input carries the same whole-book hard contracts
+	// (arc_rehearsal_input.go appends compass.EndingDirection plus all
+	// non_negotiables), so a first arc must assess the finale, the mid-book
+	// dao-heart collapse, the one-year madness period and the personality split —
+	// all of which can only honestly be reported as "outside this arc"
+	// (measured: 6 of 9 contract checks in arc 1-8, every one of them annotated
+	// "弧1-8外, 远期…"). Treating that honesty as a blocker makes the first arc
+	// unreachable for any book with book-level contracts, no matter how well the
+	// arc itself is planned.
+	//
+	// A prediction the host cannot falsify is recorded in unresolved_items and
+	// re-checked during detailed planning; `infeasible_prediction` is the verdict
+	// for an arc path that cannot come true, and material `missing` is the verdict
+	// for a resource the arc actually needs and does not have. Those two remain
+	// hard blockers.
 	for _, check := range report.Body.ContractChecks {
-		if check.Assessment == "unresolved" || check.Assessment == "infeasible_prediction" {
+		if check.Assessment == "infeasible_prediction" {
 			report.ReadyForDetail = false
 		}
 	}
 	for _, check := range report.Body.MaterialChecks {
-		if check.Status == "missing" || check.Status == "unclear" {
+		if check.Status == "missing" {
 			report.ReadyForDetail = false
 		}
 	}

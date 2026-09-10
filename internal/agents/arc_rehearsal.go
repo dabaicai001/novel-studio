@@ -35,11 +35,14 @@ const arcRehearsalReviewPrompt = "\n你是复核者：独立检查Architect草�
 // conditions plus character conflicts, contract checks, and material checks
 // carrying capability requirements), and one rejection typically exposes only
 // one of several independent defects — the submit tool stops at the first
-// violation. With a ceiling of 4 the Architect ran out while still repairing
-// distinct fields (measured on the first arc: 2 capability rejections, then 2
-// character-conflict rejections, then "max turns (4) reached"). Keep the ceiling
-// configurable downward, never upward.
-const arcRehearsalMaxTurns = 8
+// violation. Two failure shapes consume attempts: distinct field repairs, and
+// outright malformed submissions when the model truncates its own oversized
+// JSON ("unexpected end of JSON input"), which only a clean retry can clear.
+// With a ceiling of 4 the Architect exhausted its budget mid-repair (measured on
+// the first arc: 2 capability rejections, then 2 character-conflict rejections,
+// then "max turns (4) reached"). Keep the ceiling configurable downward, never
+// upward.
+const arcRehearsalMaxTurns = 30
 
 func ArcRehearsalProtocolDigest() (string, error) {
 	tool := &submitArcRehearsalTool{}
