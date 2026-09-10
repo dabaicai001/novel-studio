@@ -2392,6 +2392,164 @@ def quality_payload(run: Path) -> dict:
     }
 
 
+# ---------- 章节正文 ----------
+
+# 单章正文读取上限：正常的章节文件只有几十 KB，超过这个量级说明不是章节正文。
+CHAPTER_READ_LIMIT = 2 * 1024 * 1024
+
+# 候选草稿文件名：drafts/NN.draft.md 或 drafts/NN.md。
+_DRAFT_STEM = re.compile(r"^([0-9]{2,})(?:[.\-].*)?$")
+
+
+def draft_files(nd: Path) -> dict[int, Path]:
+    """候选草稿章号 → 文件。候选未经验收，只作为「正在写什么」的只读视图。"""
+    out: dict[int, Path] = {}
+    drafts = nd / "drafts"
+    if not drafts.is_dir():
+        return out
+    for path in sorted(drafts.glob("*.md")):
+        m = _DRAFT_STEM.match(path.stem)
+        if not m:
+            continue
+        ch = int(m.group(1))
+        if ch > 0 and contained_regular_path(nd, path) and path.is_file():
+            out.setdefault(ch, path)
+    return out
+
+
+def chapter_source_path(nd: Path, ch: int) -> tuple[Path | None, str]:
+    """章节正文的来源：已验收正文优先，其次候选草稿。"""
+    final = nd / "chapters" / f"{ch:02d}.md"
+    if contained_regular_path(nd, final) and final.is_file():
+        return final, "chapters"
+    draft = draft_files(nd).get(ch)
+    if draft is not None:
+        return draft, "draft"
+    return None, ""
+
+
+def chapters_payload(run: Path) -> dict:
+    """章节清单：规划 ∪ 落盘，供看板列举与跳读。"""
+    nd = novel_dir(run)
+    final_chapters = chapter_files(nd)
+    final_set = set(final_chapters)
+    drafts = draft_files(nd)
+    planned: dict[int, dict] = {}
+    for item in read_json(nd / "outline.json") or []:
+        if isinstance(item, dict):
+            ch = int_value(item.get("chapter"))
+            if ch > 0:
+                planned[ch] = item
+    base = summarize_run(run)
+    words_map = base.get("chapter_words") or {}
+
+    rows = []
+    for ch in sorted(final_set | set(drafts) | set(planned)):
+        plan = planned.get(ch) or {}
+        plan_title = str(plan.get("title") or "")
+        if ch in final_set:
+            verdict, gate, warns, rw = review_state(nd, ch)
+            state = "accepted" if verdict == "accept" else "rewrite" if verdict == "rewrite" else "written"
+            rows.append({
+                "chapter": ch,
+                "title": chapter_title(nd, ch) or plan_title,
+                "words": words_map.get(str(ch)) or count_words(nd, ch),
+                "state": state,
+                "verdict": verdict,
+                "gate": gate,
+                "gate_warnings": warns,
+                "rewrite_pending": rw["pending"],
+                "rewrite_rounds": rw["rounds"],
+                "source": "chapters",
+                "readable": True,
+                "updated_at": iso_time(latest_mtime(nd / "chapters" / f"{ch:02d}.md")),
+            })
+        elif ch in drafts:
+            path = drafts[ch]
+            words, title, _ = _body_metadata(path)
+            rows.append({
+                "chapter": ch,
+                "title": plan_title or title,
+                "words": words,
+                "state": "draft",
+                "verdict": "",
+                "gate": "",
+                "gate_warnings": 0,
+                "rewrite_pending": False,
+                "rewrite_rounds": 0,
+                "source": "draft",
+                "readable": True,
+                "updated_at": iso_time(latest_mtime(path)),
+            })
+        else:
+            rows.append({
+                "chapter": ch,
+                "title": plan_title,
+                "words": 0,
+                "state": "planned",
+                "verdict": "",
+                "gate": "",
+                "gate_warnings": 0,
+                "rewrite_pending": False,
+                "rewrite_rounds": 0,
+                "source": "planned",
+                "readable": False,
+                "core_event": clip(plan.get("core_event"), 200),
+                "updated_at": "",
+            })
+    return {
+        "chapters": rows,
+        "written": sum(1 for r in rows if r["source"] == "chapters"),
+        "drafts": sum(1 for r in rows if r["source"] == "draft"),
+        "planned": sum(1 for r in rows if r["source"] == "planned"),
+        "total_words": sum(int(r["words"] or 0) for r in rows if r["source"] == "chapters"),
+        "current_chapter": int_value(base.get("current_chapter")),
+        "total_chapters": int_value(base.get("chapters_total")),
+    }
+
+
+def chapter_payload(run: Path, ch: int) -> dict | None:
+    """单章正文全文（只读）。"""
+    nd = novel_dir(run)
+    path, source = chapter_source_path(nd, ch)
+    if path is None:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > CHAPTER_READ_LIMIT:
+        return {"chapter": ch, "error": f"章节文件 {size} 字节，超过看板阅读上限，请在服务器上直接查看"}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"chapter": ch, "error": str(exc)}
+
+    verdict, gate, warns, rw = review_state(nd, ch)
+    try:
+        rel = str(path.relative_to(nd))
+    except ValueError:
+        rel = path.name
+    return {
+        "chapter": ch,
+        "title": chapter_title(nd, ch) or _body_metadata(path)[1],
+        "source": source,
+        "source_label": "正式正文（已过门禁）" if source == "chapters" else "候选草稿（未验收）",
+        "path": rel,
+        "text": text,
+        "words": len(text),
+        "sha256": _body_metadata(path)[2],
+        "updated_at": iso_time(latest_mtime(path)),
+        "verdict": verdict,
+        "gate": gate,
+        "gate_warnings": warns,
+        "rewrite_pending": rw["pending"],
+        "rewrite_rounds": rw["rounds"],
+        "rewrite_backup": (nd / "chapters" / f"{ch:02d}.md.pre-rewrite.md").is_file(),
+        "has_draft": ch in draft_files(nd),
+    }
+
+
 # ---------- HTTP ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -2424,7 +2582,16 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/novels":
                 return self._json({"runs_dir": str(RUNS_DIR),
                                    "novels": [summarize_run(r) for r in list_runs()]})
-            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen|growth|quality))?$", path)
+            m = re.match(r"^/api/novels/([^/]+)/chapter/([0-9]{1,4})$", path)
+            if m:
+                run = RUNS_DIR / m.group(1)
+                if not is_run_dir(run) or run.parent != RUNS_DIR:
+                    return self._json({"error": "not found"}, 404)
+                payload = chapter_payload(run, int(m.group(2)))
+                if payload is None:
+                    return self._json({"error": "chapter not found"}, 404)
+                return self._json(payload)
+            m = re.match(r"^/api/novels/([^/]+)(?:/(setting|cast|plan|offscreen|growth|quality|chapters))?$", path)
             if m:
                 run = RUNS_DIR / m.group(1)
                 if not is_run_dir(run) or run.parent != RUNS_DIR:
@@ -2442,6 +2609,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(growth_payload(run))
                 if section == "quality":
                     return self._json(quality_payload(run))
+                if section == "chapters":
+                    return self._json(chapters_payload(run))
                 return self._json(run_detail(run))
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
