@@ -555,6 +555,18 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		if err := decode("compass", &compass); err != nil {
 			return nil, err
 		}
+		// 载荷里声明了非空列表、归一化后却为空，说明模型用了对象等不受支持的形状。
+		// 必须报错让模型改成字符串数组重试，不能静默保存空列表（否则流水线会
+		// 反复报「compass.non_negotiables 迁移后仍为空」，而工具每次都返回成功）。
+		for _, field := range []string{"non_negotiables", "open_threads"} {
+			parsed := len(compass.NonNegotiables)
+			if field == "open_threads" {
+				parsed = len(compass.OpenThreads)
+			}
+			if err := guardCompassListShape(content, field, parsed); err != nil {
+				return nil, err
+			}
+		}
 		// 工具层强制覆盖 LastUpdated 为当前已完成章节数，不信任 LLM 自填。
 		// LLM 通常忘填或留 0，会让 diag.CompassDrift 误报、Router 路由失真。
 		if p, _ := t.store.Progress.Load(); p != nil {
@@ -681,6 +693,31 @@ func foundationRAGSourcePath(kind string) string {
 	default:
 		return foundationArtifact(kind)
 	}
+}
+
+// guardCompassListShape 拦截「载荷声明了非空列表、归一化后却为空」的静默丢数据：
+// 常见于模型把硬合同写成对象数组（{id,category,rule,evidence}），而 compass 字段是
+// []string。此时必须让模型改成字符串数组重试，而不是保存一个空列表后返回成功。
+func guardCompassListShape(content, field string, parsed int) error {
+	if parsed > 0 {
+		return nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return nil
+	}
+	value, ok := raw[field]
+	if !ok {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(value, &items); err != nil || len(items) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"compass.%s 收到 %d 项但归一化后为空：该字段必须是字符串数组(每项一行文本)，不接受对象或数组嵌套；请改写后重试: %w",
+		field, len(items), errs.ErrToolArgs,
+	)
 }
 
 func foundationArtifact(t string) string {

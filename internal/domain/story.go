@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Novel 小说元信息。
@@ -96,6 +97,14 @@ func normalizeCompassStringList(value any) []string {
 		for _, item := range v {
 			if s, ok := item.(string); ok && s != "" {
 				out = append(out, s)
+				continue
+			}
+			// LLM 常把「可验证的硬合同」写成对象（{id,category,rule,evidence}）。
+			// 早期实现直接丢弃非字符串项，导致 save_foundation 返回成功、
+			// 而 compass.non_negotiables 落盘为空，流水线反复报「迁移后仍为空」。
+			// 这里折叠成一行文本并保留证据，避免静默丢数据。
+			if s := compassItemText(item); s != "" {
+				out = append(out, s)
 			}
 		}
 		return out
@@ -103,6 +112,32 @@ func normalizeCompassStringList(value any) []string {
 		return v
 	}
 	return nil
+}
+
+// compassItemText 把对象形态的列表项折叠成一行文本：取首个非空的语义字段，
+// 并把 evidence/依据 附在括号里保留可追溯性。无法识别时返回空串。
+func compassItemText(item any) string {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return ""
+	}
+	pick := func(keys ...string) string {
+		for _, key := range keys {
+			if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		return ""
+	}
+	text := pick("rule", "text", "contract", "description", "summary", "value", "name", "title")
+	if text == "" {
+		return ""
+	}
+	evidence := pick("evidence", "evidence_ref", "source", "basis", "依据")
+	if evidence != "" && !strings.Contains(text, evidence) {
+		return fmt.Sprintf("%s（依据：%s）", text, evidence)
+	}
+	return text
 }
 
 // ArcOutline 弧级大纲。
