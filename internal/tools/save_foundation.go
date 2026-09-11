@@ -427,6 +427,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 		}); err != nil {
 			return nil, err
 		}
+		if err := completeOutlineAllArcContractRefs(t.store, a.Volume, a.Arc, chapters); err != nil {
+			return nil, err
+		}
 		if err := validateOutlineAllArcMutationContent(
 			t.store, domain.OutlineAllActionExpandArc, a.Volume, a.Arc, chapters,
 		); err != nil {
@@ -456,6 +459,9 @@ func (t *SaveFoundationTool) Execute(ctx context.Context, args json.RawMessage) 
 			Arc:                 a.Arc,
 			ExpectedChapterSpan: len(chapters),
 		}); err != nil {
+			return nil, err
+		}
+		if err := completeOutlineAllArcContractRefs(t.store, a.Volume, a.Arc, chapters); err != nil {
 			return nil, err
 		}
 		if err := validateOutlineAllArcMutationContent(

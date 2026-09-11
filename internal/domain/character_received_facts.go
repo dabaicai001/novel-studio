@@ -53,9 +53,14 @@ func assignCharacterReceivedFactIDsV2(state WorldPhysicalStateV2) WorldPhysicalS
 		actor := &state.Actors[i]
 		actor.ReceivedFacts = append([]CharacterReceivedFactV2(nil), actor.ReceivedFacts...)
 		for j := range actor.ReceivedFacts {
-			if actor.ReceivedFacts[j].ID == "" {
-				actor.ReceivedFacts[j].ID = CharacterReceivedFactIDV2(actor.AgentID, actor.ReceivedFacts[j])
-			}
+			// The identity is a deterministic function of the fact's own content
+			// (CharacterReceivedFactIDV2 clears ID before hashing), so the host owns
+			// it. A model-supplied id — invented, stale after an edit, or copied from
+			// another actor — is replaced instead of failing the whole post-state with
+			// "actor received fact identity/text/source is invalid", which costs a
+			// full arbitration resubmission per attempt.
+			fact := &actor.ReceivedFacts[j]
+			fact.ID = CharacterReceivedFactIDV2(actor.AgentID, *fact)
 		}
 	}
 	return state

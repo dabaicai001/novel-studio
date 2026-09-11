@@ -3,8 +3,31 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
+
+// sortedCharacterReadinessRefs renders a bounded, stable list of the references
+// this review accepts, so a rejection can name the legal values instead of only
+// the rule. Terse feedback ("cites evidence outside its exact input") left the
+// model guessing which digest to cite and cost three resubmissions on chapter 1.
+func sortedCharacterReadinessRefs(refs map[string]bool, limit int) string {
+	all := make([]string, 0, len(refs))
+	for ref := range refs {
+		if strings.TrimSpace(ref) != "" {
+			all = append(all, ref)
+		}
+	}
+	sort.Strings(all)
+	if len(all) == 0 {
+		return "（本轮尚无可引用证据）"
+	}
+	shown := all
+	if limit > 0 && len(shown) > limit {
+		shown = shown[:limit]
+	}
+	return strings.Join(shown, ", ")
+}
 
 const CharacterReadinessReviewPolicy = "chapter-readiness:arbitrated-events.v1"
 const CharacterReadinessReviewedVersion = "character-chapter-readiness.v2"
@@ -273,18 +296,19 @@ func FinalizeCharacterReadinessReview(input CharacterReadinessReviewInput, verdi
 		}
 	}
 	validateRefs := func(refs []string) error {
+		candidates := sortedCharacterReadinessRefs(actual, 8)
 		if len(refs) == 0 || len(refs) > 12 {
-			return fmt.Errorf("readiness must cite 1-12 actual evidence references")
+			return fmt.Errorf("readiness must cite 1-12 actual evidence references。可引用的已绑定证据共 %d 个：%s", len(actual), candidates)
 		}
 		actualCited := false
 		for _, ref := range refs {
 			if !allowed[ref] {
-				return fmt.Errorf("readiness cites evidence outside its exact input")
+				return fmt.Errorf("readiness cites evidence outside its exact input：%q 不在可用清单里。可引用的已绑定证据共 %d 个，前 8 个：%s", ref, len(actual), candidates)
 			}
 			actualCited = actualCited || actual[ref]
 		}
 		if !actualCited {
-			return fmt.Errorf("a proposal alone cannot prove readiness; cite an actual cycle/arbitration/state")
+			return fmt.Errorf("a proposal alone cannot prove readiness; cite an actual cycle/arbitration/state。可引用的已绑定证据共 %d 个，前 8 个：%s", len(actual), candidates)
 		}
 		return nil
 	}

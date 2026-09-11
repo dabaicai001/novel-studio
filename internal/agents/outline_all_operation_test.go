@@ -480,10 +480,13 @@ func TestOutlineAllArcContractAuthorizationNamesTheOnlyAuthorizedRefs(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"V1A2", "第 9-14 章", ref.ID, "必须挂在全局第 12 章", "contract_ref_drift", ref.SourceDigest, ref.PlannedResolution} {
+	for _, want := range []string{"V1A2", "第 9-14 章", ref.ID, "必须挂在全局第 12 章", ref.PlannedResolution, `写 {"id": "..."} 即可`} {
 		if !strings.Contains(ownerClause, want) {
 			t.Fatalf("contract-owning arc clause missing %q: %q", want, ownerClause)
 		}
+	}
+	if strings.Contains(ownerClause, ref.SourceDigest) {
+		t.Fatalf("clause still asks the model to copy the frozen ref object: %q", ownerClause)
 	}
 	if strings.Contains(ownerClause, "contract_refs 为空") {
 		t.Fatalf("contract-owning arc clause wrongly claims an empty whitelist: %q", ownerClause)

@@ -200,6 +200,61 @@ func validateOutlineAllMapContractsContent(
 	return nil
 }
 
+// completeOutlineAllArcContractRefs lets the model identify a payoff by ID only.
+// Every ref object the arc is authorized to pay off is already frozen in the
+// layered outline (map_contracts wrote it), so the host can fill the authoritative
+// object itself instead of demanding that the model reproduce source_digest and
+// planned_resolution byte-for-byte. Measured cost of the old requirement: four
+// wasted turns on arc 1 (unknown_contract_ref) and four more on a later arc
+// (contract_ref_drift), because every retry re-emits the whole chapter array and
+// repairs one ref at a time.
+//
+// IDs the arc is NOT authorized to pay off are left untouched, so the existing
+// unknown_contract_ref check still rejects them.
+func completeOutlineAllArcContractRefs(st *store.Store, volume, arc int, chapters []domain.OutlineEntry) error {
+	if st == nil {
+		return nil
+	}
+	volumes, err := st.Outline.LoadLayeredOutline()
+	if err != nil {
+		return err
+	}
+	var frozen []domain.StoryContractRef
+	for _, v := range volumes {
+		if v.Index != volume {
+			continue
+		}
+		for _, a := range v.Arcs {
+			if a.Index == arc {
+				frozen = a.ContractRefs
+			}
+		}
+	}
+	if len(frozen) == 0 {
+		return nil
+	}
+	byID := make(map[string]domain.StoryContractRef, len(frozen))
+	for _, ref := range frozen {
+		byID[ref.ID] = ref
+	}
+	filled := 0
+	for i := range chapters {
+		for j := range chapters[i].ContractRefs {
+			current := chapters[i].ContractRefs[j]
+			authoritative, ok := byID[current.ID]
+			if !ok || current == authoritative {
+				continue
+			}
+			chapters[i].ContractRefs[j] = authoritative
+			filled++
+		}
+	}
+	if filled > 0 {
+		fmt.Fprintf(os.Stderr, "[outline-all] 宿主按 id 补全 %d 个 contract_refs（模型只需给出 ref id）\n", filled)
+	}
+	return nil
+}
+
 func validateOutlineAllArcMutationContent(
 	st *store.Store,
 	kind domain.OutlineAllActionType,

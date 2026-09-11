@@ -390,6 +390,73 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 	return report, err
 }
 
+// MergeArcRehearsalReviewMaterialChecks makes the host responsible for carrying
+// the draft's material checks into the review, so the reviewer only has to submit
+// genuine additions or corrections instead of re-emitting every entry verbatim.
+//
+// The review body is large and the arbiter resubmits all of it per attempt, so
+// demanding byte-exact preservation burned the whole retry budget on arc 1: ten
+// consecutive rejections ("缺 material_check ...", "capability_requirement ... 被改写
+// 或删除") because each retry repaired one entry and broke another.
+//
+// Policy: a draft entry is authoritative for its own operation (requires_readable,
+// resource_refs, explanation and every declared capability_requirement are kept,
+// with review-only requirements appended in submitted order). A review that
+// reports a gap — status missing/unclear — still wins, because that is new
+// information rather than a rewrite.
+func MergeArcRehearsalReviewMaterialChecks(draft, review ArcRehearsalBody) ArcRehearsalBody {
+	if len(draft.MaterialChecks) == 0 {
+		return review
+	}
+	reviewIndex := make(map[string]int, len(review.MaterialChecks))
+	for i, check := range review.MaterialChecks {
+		if _, exists := reviewIndex[check.Operation]; !exists {
+			reviewIndex[check.Operation] = i
+		}
+	}
+	draftIndex := make(map[string]struct{}, len(draft.MaterialChecks))
+	merged := make([]ArcRehearsalMaterialCheck, 0, len(draft.MaterialChecks)+len(review.MaterialChecks))
+	for _, prior := range draft.MaterialChecks {
+		draftIndex[prior.Operation] = struct{}{}
+		current, ok := reviewIndex[prior.Operation]
+		if !ok {
+			merged = append(merged, prior)
+			continue
+		}
+		entry := prior
+		if reviewStatusIsGap(review.MaterialChecks[current].Status) && prior.Status != review.MaterialChecks[current].Status {
+			entry.Status = review.MaterialChecks[current].Status
+			if explanation := strings.TrimSpace(review.MaterialChecks[current].Explanation); explanation != "" {
+				entry.Explanation = explanation
+			}
+		}
+		seen := make(map[string]struct{}, len(entry.CapabilityRequirements))
+		for _, requirement := range entry.CapabilityRequirements {
+			seen[requirement.Key] = struct{}{}
+		}
+		for _, requirement := range review.MaterialChecks[current].CapabilityRequirements {
+			if _, exists := seen[requirement.Key]; exists {
+				continue
+			}
+			seen[requirement.Key] = struct{}{}
+			entry.CapabilityRequirements = append(entry.CapabilityRequirements, requirement)
+		}
+		merged = append(merged, entry)
+	}
+	for _, check := range review.MaterialChecks {
+		if _, isPrior := draftIndex[check.Operation]; isPrior {
+			continue
+		}
+		merged = append(merged, check)
+	}
+	review.MaterialChecks = merged
+	return review
+}
+
+func reviewStatusIsGap(status string) bool {
+	return status == "missing" || status == "unclear"
+}
+
 // ValidateArcRehearsalReviewBody validates the full review and preserves every
 // original dependency by key. Additions remain subject to the same typed/global
 // checks; independent display order is not a new execution constraint. Callers

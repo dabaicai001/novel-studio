@@ -88,17 +88,21 @@ func (t *submitArcRehearsalTool) Execute(_ context.Context, raw json.RawMessage)
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, fmt.Errorf("rehearsal output must contain one JSON object")
 	}
-	if err := domain.ValidateArcRehearsalBody(t.input, body); err != nil {
-		return nil, err
-	}
 	if t.draft != nil {
 		verified, err := domain.FinalizeArcRehearsalDraft(t.input, *t.draft)
 		if err != nil || !sameCharacterCycleValue(verified, *t.draft) {
 			return nil, fmt.Errorf("rehearsal review lacks its exact verified draft")
 		}
+		// The host, not the reviewer, carries the draft's material checks into the
+		// review: the reviewer submits additions and corrections only. Requiring
+		// byte-exact preservation burned the whole retry budget on arc 1.
+		body = domain.MergeArcRehearsalReviewMaterialChecks(t.draft.Body, body)
 		if err := domain.ValidateArcRehearsalReviewBody(t.input, t.draft.Body, body); err != nil {
 			return nil, err
 		}
+	}
+	if err := domain.ValidateArcRehearsalBody(t.input, body); err != nil {
+		return nil, err
 	}
 	if t.body != nil {
 		return nil, fmt.Errorf("rehearsal stage already submitted")

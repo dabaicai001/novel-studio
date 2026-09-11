@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -130,6 +131,50 @@ func arbitrationReferenceLabel(ref string) string {
 // callers must still run FinalizeWorldArbitrationReceipt after it succeeds.
 // Dynamic access, discovery, received facts and numerical perception remain
 // exclusively under the original full kernel and are not rejected here.
+// arbitrationReferenceCandidates lists the identifiers this check accepts, bounded
+// so feedback can never echo an unbounded directory. A terse "use bound
+// source/proposal evidence" leaves the model guessing which digest it should have
+// copied, and every guess costs a full receipt resubmission.
+func arbitrationReferenceCandidates(catalog arbitrationReferenceCatalogV2, used map[string]bool, settlement bool, limit int) string {
+	seen := make(map[string]struct{}, len(catalog.evidence))
+	all := make([]string, 0, len(catalog.evidence))
+	collect := func(ref string) {
+		if strings.TrimSpace(ref) == "" {
+			return
+		}
+		if _, exists := seen[ref]; exists {
+			return
+		}
+		seen[ref] = struct{}{}
+		all = append(all, ref)
+	}
+	for ref, ok := range catalog.evidence {
+		if ok {
+			collect(ref)
+		}
+	}
+	if settlement {
+		for ref, ok := range used {
+			if ok {
+				collect(ref)
+			}
+		}
+	}
+	sort.Strings(all)
+	if len(all) == 0 {
+		return "本弧目前没有任何已绑定证据可引用；请把该条目改成 missing/unclear 并留空 evidence_refs"
+	}
+	shown := all
+	if limit > 0 && len(shown) > limit {
+		shown = shown[:limit]
+	}
+	label := "已绑定证据"
+	if settlement {
+		label = "已绑定证据或本 receipt 内 resolution.mechanism_refs 真正声明过的机制"
+	}
+	return fmt.Sprintf("可用的%s共 %d 个，前 %d 个：%s", label, len(all), len(shown), strings.Join(shown, ", "))
+}
+
 func PrecheckWorldArbitrationStaticReferencesV2(receipt WorldArbitrationReceipt, stimulus WorldStimulusPacket, proposals []CharacterDecisionProposal) error {
 	if receipt.Version != WorldArbitrationReceiptV2Version || stimulus.Version != WorldStimulusPacketV2Version || stimulus.PhysicalState == nil {
 		return nil // Cannot establish this static directory; leave the original gate in charge.
@@ -165,9 +210,9 @@ func PrecheckWorldArbitrationStaticReferencesV2(receipt WorldArbitrationReceipt,
 				continue
 			}
 			if settlement {
-				issues.add(fmt.Sprintf("%s[%d]: unbound %s; use bound source/proposal evidence or a world mechanism actually named in resolution.mechanism_refs", path, index, arbitrationReferenceLabel(ref)))
+				issues.add(fmt.Sprintf("%s[%d]: unbound %s; use bound source/proposal evidence or a world mechanism actually named in resolution.mechanism_refs。%s", path, index, arbitrationReferenceLabel(ref), arbitrationReferenceCandidates(catalog, used, true, 8)))
 			} else {
-				issues.add(fmt.Sprintf("%s[%d]: unbound %s; use bound source/proposal evidence, not a communication identifier or a settlement-only mechanism", path, index, arbitrationReferenceLabel(ref)))
+				issues.add(fmt.Sprintf("%s[%d]: unbound %s; use bound source/proposal evidence, not a communication identifier or a settlement-only mechanism。%s", path, index, arbitrationReferenceLabel(ref), arbitrationReferenceCandidates(catalog, used, false, 8)))
 			}
 		}
 	}

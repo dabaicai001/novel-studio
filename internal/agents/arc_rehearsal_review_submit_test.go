@@ -219,8 +219,23 @@ func TestArcRehearsalReviewPreservesOriginalKeysButAllowsValidAdditions(t *testi
 			mutate(&bad)
 			tool := &submitArcRehearsalTool{input: input, draft: &draft}
 			raw, _ := json.Marshal(bad)
-			if _, err := tool.Execute(context.Background(), raw); err == nil || tool.body != nil {
-				t.Fatal("changed old dependency or invalid addition was accepted by tool")
+			if _, err := tool.Execute(context.Background(), raw); err == nil {
+				// The host, not the reviewer, now carries the draft's material checks
+				// into the review (MergeArcRehearsalReviewMaterialChecks): a rewritten
+				// or dropped draft dependency is RESTORED instead of rejected, because
+				// rejecting made the arbiter re-emit the whole body and repair one
+				// entry per turn until its budget was gone. What must still hold is
+				// that nothing the draft declared is lost and that whatever the host
+				// accepted passes the full validator.
+				merged := *tool.body
+				assertDraftMaterialChecksPreserved(t, draft.Body, merged)
+				if _, err := domain.FinalizeArcRehearsalReport(input, draft, domain.ArcRehearsalReport{Body: merged, Call: call}); err != nil {
+					t.Fatalf("accepted review body is not valid: %v", err)
+				}
+				return
+			}
+			if tool.body != nil {
+				t.Fatal("rejected review still recorded a body")
 			}
 			if _, err := domain.FinalizeArcRehearsalReport(input, draft, domain.ArcRehearsalReport{Body: bad, Call: call}); err == nil {
 				t.Fatal("finalize lost full validation or old-key preservation")
@@ -231,5 +246,35 @@ func TestArcRehearsalReviewPreservesOriginalKeysButAllowsValidAdditions(t *testi
 				t.Fatal("store bypassed the same defensive validator")
 			}
 		})
+	}
+}
+
+// assertDraftMaterialChecksPreserved pins the host-side merge contract: every
+// material check and every capability requirement the draft declared is present in
+// the reviewed body (by operation and by requirement key), so a paraphrasing or
+// omitting reviewer can never silently drop a dependency.
+func assertDraftMaterialChecksPreserved(t *testing.T, draft, reviewed domain.ArcRehearsalBody) {
+	t.Helper()
+	byOperation := map[string]domain.ArcRehearsalMaterialCheck{}
+	for _, check := range reviewed.MaterialChecks {
+		byOperation[check.Operation] = check
+	}
+	for _, prior := range draft.MaterialChecks {
+		got, ok := byOperation[prior.Operation]
+		if !ok {
+			t.Fatalf("merged review lost draft material check %q", prior.Operation)
+		}
+		if prior.RequiresReadable && !got.RequiresReadable {
+			t.Fatalf("merged review dropped requires_readable for %q", prior.Operation)
+		}
+		keys := map[string]struct{}{}
+		for _, requirement := range got.CapabilityRequirements {
+			keys[requirement.Key] = struct{}{}
+		}
+		for _, requirement := range prior.CapabilityRequirements {
+			if _, exists := keys[requirement.Key]; !exists {
+				t.Fatalf("merged review lost capability requirement %q of %q", requirement.Key, prior.Operation)
+			}
+		}
 	}
 }
