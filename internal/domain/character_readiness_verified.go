@@ -113,6 +113,6 @@ func NewCharacterReadinessReviewInputFromSteps(context CharacterReadinessContext
 	}
 	input = CharacterReadinessReviewInput{Policy: CharacterReadinessReviewPolicy, ReviewProtocol: reviewProtocol, SessionDigest: session.Digest,
 		Context: context, Trace: trace, RemainingCycles: session.MaxCycles - len(steps)}
-	input.Requirements, err = characterReadinessRequirements(context)
+	input.Requirements, err = CharacterReadinessRequirements(context)
 	return input, err
 }

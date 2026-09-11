@@ -32,6 +32,32 @@ func sortedCharacterReadinessRefs(refs map[string]bool, limit int) string {
 const CharacterReadinessReviewPolicy = "chapter-readiness:arbitrated-events.v1"
 const CharacterReadinessReviewedVersion = "character-chapter-readiness.v2"
 
+// CharacterFrozenCoreEventContractPrefix marks a hard contract that binds the
+// chapter's frozen projected core event. Unlike the book-level hard contracts
+// (due only in the final chapter), this one is due in the chapter that owns it:
+// the arbitration has to make the event actually happen, with only its staging,
+// order, cost and side effects left to the characters.
+const CharacterFrozenCoreEventContractPrefix = "本章冻结核心事件（终态不可改变；角色只能决定如何发生、付出什么代价，不可落空、替换或推迟到别章）："
+
+// IsFrozenCoreEventContract reports whether a hard contract binds the chapter's
+// own frozen core event, so readiness reaches it in the chapter that owns it.
+func IsFrozenCoreEventContract(contract string) bool {
+	return strings.HasPrefix(strings.TrimSpace(contract), CharacterFrozenCoreEventContractPrefix)
+}
+
+// FrozenCoreEventContractText renders the host-owned hard contract that binds one
+// chapter's frozen projected core event. The contract carries its own
+// adjudication and readiness semantics, so no frozen model protocol has to
+// change: the event is due in its own chapter, only its terminal state is fixed,
+// and a first-round proposal that makes it impossible must go back to the
+// characters for revision instead of being declared infeasible or rewritten into
+// another event. Leaving this event to locally rational agents silently replaced
+// authored, theme-bearing scenes with survival calculus.
+func FrozenCoreEventContractText(event string) string {
+	return CharacterFrozenCoreEventContractPrefix + strings.TrimSpace(event) +
+		`。本章到期项：必须由本章实际裁决的事件兑现该终态；顺序、场合、实际用时、代价、参与者与可观测后果可以按角色的真实提案不同。第一轮提案使该事件不可能发生时，finalized=false 并给相关角色最小冲突反馈，要求其就本人在该事件中的做法重新提案；不得标为 infeasible，不得把它改写成别的事件，也不得用意图、承诺、打算或离屏计划代替实际发生。`
+}
+
 // This is a frozen host planning context, not a character observation. The
 // session binds its digest before the first cycle, so a later outline edit
 // cannot silently change what an already paid readiness review was judging.
@@ -220,18 +246,21 @@ func NewCharacterReadinessReviewInput(context CharacterReadinessContext, session
 		return input, err
 	}
 	input = CharacterReadinessReviewInput{Policy: CharacterReadinessReviewPolicy, ReviewProtocol: reviewProtocol, SessionDigest: session.Digest, Context: context, Trace: trace, RemainingCycles: session.MaxCycles - len(cycles)}
-	input.Requirements, err = characterReadinessRequirements(context)
+	input.Requirements, err = CharacterReadinessRequirements(context)
 	return input, err
 }
 
-func characterReadinessRequirements(context CharacterReadinessContext) ([]CharacterReadinessRequirement, error) {
+func CharacterReadinessRequirements(context CharacterReadinessContext) ([]CharacterReadinessRequirement, error) {
 	var requirements []CharacterReadinessRequirement
 	for _, contract := range context.HardContracts {
 		hash, err := characterAgentDigest(contract)
 		if err != nil {
 			return nil, err
 		}
-		requirements = append(requirements, CharacterReadinessRequirement{ID: "hard_" + strings.TrimPrefix(hash, "sha256:"), Contract: contract, DueNow: context.Chapter == context.BookLastChapter})
+		// Book-level hard contracts mature at the end of the book; the chapter's
+		// own frozen core event matures in the chapter that owns it.
+		dueNow := context.Chapter == context.BookLastChapter || IsFrozenCoreEventContract(contract)
+		requirements = append(requirements, CharacterReadinessRequirement{ID: "hard_" + strings.TrimPrefix(hash, "sha256:"), Contract: contract, DueNow: dueNow})
 	}
 	for _, obligation := range context.Obligations {
 		if obligation.Hardness != ObligationHardnessV2("hard") {
@@ -258,7 +287,7 @@ func CharacterReadinessReviewInputDigest(input CharacterReadinessReviewInput) (s
 			return "", err
 		}
 	}
-	requirements, err := characterReadinessRequirements(context)
+	requirements, err := CharacterReadinessRequirements(context)
 	if err != nil {
 		return "", err
 	}

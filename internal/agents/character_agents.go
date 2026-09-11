@@ -875,6 +875,19 @@ func buildWorldStimulusDraft(st *store.Store, generationID string, chapter int, 
 	if entry, _ := st.Outline.GetChapterOutline(chapter); entry != nil {
 		packet.SoftGuidance = append(packet.SoftGuidance, entry.Title, entry.CoreEvent)
 		packet.SoftGuidance = append(packet.SoftGuidance, entry.Scenes...)
+		// The frozen chapter core event is what this chapter must actually
+		// deliver. It is NOT advisory: leaving it to locally rational agents
+		// silently replaced authored, theme-bearing scenes with survival
+		// calculus (a protagonist who hoards his sister's medicine money instead
+		// of spending it on a stranger keeps every resource but loses the act
+		// that defines his 道心), and the plan then had to be rewritten to match
+		// the arbitration. The hard-contract channel is the one readiness review
+		// turns into frozen requirements, so characters still choose how the
+		// event happens, its cost and its side effects, but they can neither
+		// skip it, replace it nor defer it to another chapter.
+		if event := strings.TrimSpace(entry.CoreEvent); event != "" {
+			packet.HardContracts = append(packet.HardContracts, domain.FrozenCoreEventContractText(event))
+		}
 	}
 	packet.SoftGuidance = append(packet.SoftGuidance, "arc_goal: "+boundary.Goal)
 	if compass, _ := st.Outline.LoadCompass(); compass != nil {

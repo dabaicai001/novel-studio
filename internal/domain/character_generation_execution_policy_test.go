@@ -39,7 +39,7 @@ func generationExecutionPolicyModelView(t *testing.T, count int) CharacterReadin
 	}
 	input := CharacterReadinessReviewInput{Policy: CharacterReadinessReviewPolicy, ReviewProtocol: digest(100), SessionDigest: digest(101), Context: context, RemainingCycles: 8 - count,
 		Trace: CharacterReadinessTrace{FinalPhysicalRoot: digest(102)}}
-	input.Requirements, err = characterReadinessRequirements(context)
+	input.Requirements, err = CharacterReadinessRequirements(context)
 	if err != nil {
 		t.Fatal(err)
 	}
