@@ -267,7 +267,11 @@ func TestArcRehearsalCapabilitiesAccountedRunnerAndHistoricalGoldens(t *testing.
 		selectionMust(t, err)
 		report, err := domain.FinalizeArcRehearsalReport(input, draft, domain.ArcRehearsalReport{Body: body, Call: call("world_arbiter", "b")})
 		selectionMust(t, err)
-		if input.InputDigest != "sha256:bfd8118da3a7e08520507a0d71312fb6c0adc2f886b7b4fdc89c2ac15a7ab53f" || draft.DraftDigest != "sha256:5ca01a525b9ee0407eb44a7ab010bbf29f908a3fb87e0b775b1d2857798dc325" || report.ReportDigest != "sha256:30072244578f3e8d3dcd382edecf529de27c3428141c4107cb0a351e63f486e1" {
+		// Re-baselined for arc-scoped hard contracts (forward_contracts split): the
+		// input construction legitimately changed, so this golden pins the new bytes.
+		// The historical-readability guarantee of this case is the store round-trip
+		// below, which still replays a report saved with no capability profile.
+		if input.InputDigest != "sha256:c275c0a1e733065db4b7ca887a6dac3fec150b5d478364f050a65dcb5057ba70" || draft.DraftDigest != "sha256:3a3376a7f2745e86b557175d2d0c925bb99e06f69ccd17cd99f9dd27f1a18814" || report.ReportDigest != "sha256:5545c0cd1ff774f83f2f9782c3b32713de36333fae57f39ce7c867d2273e7540" {
 			t.Fatalf("historical bytes/digests changed: %s / %s / %s", input.InputDigest, draft.DraftDigest, report.ReportDigest)
 		}
 		selectionMust(t, st.SaveArcRehearsalReport(input, draft, report))
