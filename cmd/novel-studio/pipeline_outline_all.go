@@ -1111,7 +1111,7 @@ func pipelineOutlineAllOperationPrompt(
 		arcMap := pipelineOutlineAllArcMap(volumes)
 		arcMapJSON, _ := json.MarshalIndent(arcMap, "", "  ")
 		fmt.Fprintf(&b, "只调用 save_foundation(type=\"map_contracts\", content=<ArcContractAssignment数组>)。数组必须为全书每个弧各提供且只提供一项 {volume,arc,contract_refs}，空分配也必须显式列出。不得改 title/goal/span/chapters。\n")
-		fmt.Fprintf(&b, "每个 registry ref 全书必须恰好出现一次；planned_payoff_chapter 必须落在所分配弧的闭区间内；planned_resolution 必须为至少18个有效字的具体‘行动者+行动+终态’，不得占位且各合同互异。ending/non_negotiable 必须全部分配给末弧，planned_payoff_chapter=%d。open_thread 按真实因果回收点唯一分配。\n全书弧区间：\n", target.TargetChapters)
+		fmt.Fprintf(&b, "每个 registry ref 全书必须恰好出现一次；planned_payoff_chapter 必须落在所分配弧的闭区间内；planned_resolution 必须为至少18个有效字的具体‘行动者+行动+终态’，不得占位且各合同互异。ending/non_negotiable 必须全部分配给末弧，但兑现点要摊开在该弧的不同章：同一章最多 2 条，且末章至少 1 条——不要把它们全部堆在最后一章（全书共 %d 章，末弧章区间见上）。open_thread 按真实因果回收点唯一分配。\n全书弧区间：\n", target.TargetChapters)
 		b.Write(arcMapJSON)
 		b.WriteString("\n")
 	case domain.OutlineAllActionExpandArc, domain.OutlineAllActionReviseArc:

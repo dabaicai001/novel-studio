@@ -951,6 +951,7 @@ func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, 
 		expected[ref.ID] = ref
 	}
 	counts := make(map[string]int)
+	chapterLoad := make(map[int]int)
 	resolutionOwner := make(map[string]string)
 	finalVolume, finalArc, finalChapter := finalOutlinePosition(volumes)
 	cursor := 1
@@ -978,9 +979,20 @@ func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, 
 				} else {
 					resolutionOwner[resolutionKey] = ref.ID
 				}
+				// Ending and non-negotiable contracts must be paid off inside the final
+				// ARC, not on the single final chapter. Requiring the exact final chapter
+				// piled every book-level contract onto one chapter (measured: 8 of 16
+				// contracts on chapter 114, of which 9 in that six-chapter arc), which is
+				// both unwritable as one chapter and a bad ending: the finale has to
+				// resolve them in sequence, not recite them in one scene. The arc-level
+				// requirement still keeps every book-level payoff at the end of the book,
+				// and the per-chapter payoff rule below keeps each contract unique.
 				if (want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable) &&
-					(volume.Index != finalVolume || arc.Index != finalArc || ref.PlannedPayoffChapter != finalChapter) {
-					issues = append(issues, ref.ID+" must_bind_final_arc_and_chapter")
+					(volume.Index != finalVolume || arc.Index != finalArc) {
+					issues = append(issues, ref.ID+" must_bind_final_arc")
+				}
+				if want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable {
+					chapterLoad[ref.PlannedPayoffChapter]++
 				}
 			}
 			cursor += arc.ChapterSpan()
@@ -992,6 +1004,18 @@ func StoryContractSkeletonIssues(volumes []VolumeOutline, compass StoryCompass, 
 		} else if final && counts[id] != 1 {
 			issues = append(issues, fmt.Sprintf("%s arc_payoff_count=%d", id, counts[id]))
 		}
+	}
+	// Spreading cap: at most two book-level contracts may land on one chapter, so a
+	// six-chapter final arc distributes them instead of stacking every one of them on
+	// the last scene. The final chapter must still carry at least one, so the book
+	// cannot close without delivering a book-level payoff.
+	for chapter, load := range chapterLoad {
+		if load > 2 {
+			issues = append(issues, fmt.Sprintf("chapter=%d carries %d ending/non_negotiable contracts (max 2)", chapter, load))
+		}
+	}
+	if chapterLoad[finalChapter] == 0 {
+		issues = append(issues, "final chapter must carry at least one ending/non_negotiable contract")
 	}
 	sort.Strings(issues)
 	return issues
@@ -1100,9 +1124,13 @@ func MissingCompassCoverage(volumes []VolumeOutline, compass StoryCompass) []str
 		if !OutlineContractResolutionRealized(c.payoffChapter, c.ref) {
 			missing = append(missing, id+" planned_resolution_not_realized_in_core_event_or_scenes")
 		}
-		if (want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable) &&
-			(!a.isFinalArc || !c.isFinalChapter) {
-			missing = append(missing, id+" must_payoff_at_final_chapter")
+		// Book-level contracts must be paid off inside the final ARC, not on its single
+		// final chapter: requiring the exact final chapter stacked every book-level
+		// obligation onto one scene (measured: 8 of 16 contracts on the last chapter of
+		// a 114-chapter book). The arc binding below/above still keeps every book-level
+		// payoff at the end of the book, and the per-chapter load cap keeps them spread.
+		if (want.Kind == StoryContractEnding || want.Kind == StoryContractNonNegotiable) && !a.isFinalArc {
+			missing = append(missing, id+" must_payoff_at_final_arc")
 		}
 	}
 	sort.Strings(missing)

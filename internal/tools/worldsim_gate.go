@@ -166,6 +166,20 @@ var worldTickRelativeTimeAnchors = []string{
 // may leave the action pending, but it cannot silently replace a sealed
 // four-hour/next-morning deadline with an unbounded setup. Projects without an
 // explicit time expression are unaffected.
+// WorldTickChapterOneTimeAnchors exposes the chapter-one explicit time anchors the
+// initial world_tick must carry. The dispatch contract can then name the exact
+// strings instead of asking the model to preserve text it was never shown:
+// measured, the tick was rejected for dropping "三年"/"九月" that are stated in
+// chapter 1's own core_event and hook.
+func WorldTickChapterOneTimeAnchors(st *store.Store) []string {
+	outline, _ := worldTickAuthoritativeOutlineWithIssues(st)
+	if len(outline) == 0 {
+		return nil
+	}
+	chapterOne := outline[0]
+	return worldTickExtractChapterOneTimeAnchors(strings.TrimSpace(chapterOne.CoreEvent + "\n" + chapterOne.Hook))
+}
+
 func worldTickChapterOneTimeAnchorIssues(st *store.Store, events []domain.WorldEvent) []string {
 	outline, _ := worldTickAuthoritativeOutlineWithIssues(st)
 	if len(outline) == 0 {

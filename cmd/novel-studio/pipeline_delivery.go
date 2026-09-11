@@ -898,10 +898,75 @@ func pipelineArchitect(opts cliOptions, flags pipelineFlags, state *domain.Pipel
 
 func pipelineEnsureOrRepairArchitectReadiness(opts cliOptions, cfg bootstrap.Config, bundle assets.Bundle, prompt string) error {
 	if err := pipelineEnsureArchitectReadiness(opts, cfg.OutputDir); err != nil {
+		if retired, retireErr := pipelineRetireOutlinePendingReplan(cfg.OutputDir, err); retireErr != nil {
+			return retireErr
+		} else if retired {
+			// The stale boundary outline was retired, so the plan is now owned by
+			// outline-all (no published receipt => it starts a fresh attempt and
+			// replans at the current scale).
+			return nil
+		}
 		fmt.Fprintf(os.Stderr, "[pipeline:architect] Architect readiness 未通过，进入 foundation 修复：%v\n", err)
 		return pipelineRepairArchitectReadiness(opts, cfg, bundle, prompt, err)
 	}
 	return nil
+}
+
+// pipelineRetireOutlinePendingReplan retires a boundary outline that only
+// contradicts a changed declared scale, so the book CAN be replanned at that
+// scale. Without it, changing compass.estimated_scale (or the premise's declared
+// book size) dead-ends the pipeline: with the outline present readiness reports
+// "layered_outline 规划总章数=N 超出 premise 声明范围", with it absent it reports the
+// outline as missing, and neither is attributable to the only auto-repairable
+// targets (world_rules / world_codex / book_world / characters), so the repair
+// path refused with "未归属的错误" and never replanned anything.
+//
+// The guard keeps this narrow on purpose: it fires only when the readiness
+// failure is exclusively about the outline AND no published plan receipt exists.
+// Any other blocking dimension (world coherence findings, another missing
+// foundation file) still takes the normal repair path, and a published plan keeps
+// owning its own decision until an explicit --rebase-all-chapters retires it.
+func pipelineRetireOutlinePendingReplan(outputDir string, readinessErr error) (bool, error) {
+	if readinessErr == nil || outputDir == "" {
+		return false, nil
+	}
+	message := readinessErr.Error()
+	if !strings.Contains(message, "超出 premise 声明范围") &&
+		!strings.Contains(message, "layered_outline 规划总章数") {
+		return false, nil
+	}
+	// Another missing/blocking foundation root means this is not a scale replan.
+	for _, root := range []string{"premise", "characters", "world_rules", "world_codex", "book_world", "meta/compass"} {
+		if strings.Contains(message, root+".json") || strings.Contains(message, root+".md") {
+			return false, nil
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, filepath.FromSlash(store.OutlineAllExecutionReceiptPath))); err == nil {
+		return false, nil
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
+	retired := filepath.Join(outputDir, "meta", "retired-outline-"+stamp)
+	if err := os.MkdirAll(retired, 0o755); err != nil {
+		return false, err
+	}
+	moved := make([]string, 0, 4)
+	for _, rel := range []string{"layered_outline.json", "layered_outline.md", "outline.json", "outline.md"} {
+		path := filepath.Join(outputDir, filepath.FromSlash(rel))
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return false, err
+		}
+		if err := os.Rename(path, filepath.Join(retired, filepath.Base(rel))); err != nil {
+			return false, err
+		}
+		moved = append(moved, rel)
+	}
+	if len(moved) == 0 {
+		return false, nil
+	}
+	fmt.Fprintf(os.Stderr, "[pipeline:architect] 大纲与新声明的规模不符，已将过期大纲退役到 meta/retired-outline-%s（%s）；交由 outline-all 按当前 estimated_scale 重新规划全书大纲\n", stamp, strings.Join(moved, ", "))
+	return true, nil
 }
 
 // Architect creates the sources that RAG indexes. A genuinely empty project
@@ -2031,6 +2096,11 @@ func pipelineInitialWorldTickPrompt(outputDir string) (string, error) {
 	b.WriteString("硬约束：events.actors 与 faction_clock_updates.target 只能使用下方角色名、势力 id/name/aliases；工具返回任何 warnings 都不算通过。不得引入 premise、user_rules、world_rules 与冻结首弧没有授权的题材、人物、组织或机制。\n")
 	b.WriteString("角色最早可见章节是逐字段硬边界，不只是 actor 名单提示：角色可以在镜头外提前行动，但该角色的姓名、别名、身份或行动不得通过 actors、location、summary、consequence、visibility_path 在边界前进入主角可见信息；每条事件的 visibility_chapter 必须不早于其中任一角色的最早可见章节。若较晚登场者的离屏行动会影响第1章，只能由第1章已允许可见的角色承接程序后果，且不得提前点名或揭示较晚登场者。\n")
 	b.WriteString("人物资料中的性别与代词是 canon：凡 role/description/arc 明确为女性或以“她”指代的角色，所有事件字段必须继续使用“她”，严禁用“他”指代；“其他”“他人”等非指代该角色的词不受此句影响。\n")
+	if anchors := tools.WorldTickChapterOneTimeAnchors(store.NewStore(outputDir)); len(anchors) > 0 {
+		b.WriteString("第 1 章的显式时间锚点必须原样承接：")
+		b.WriteString(strings.Join(anchors, "、"))
+		b.WriteString("。这些字符串都必须逐字出现在至少一条事件的可见字段（actor/location/summary/consequence/visibility_path）里；可以留作 pending/条件式事件，但不得改写、缩写或省略——宿主按第 1 章原文校验，缺一个本阶段即不通过。\n")
+	}
 	if forbidden := pipelineWorldTickForbiddenTopics(outputDir); len(forbidden) > 0 {
 		b.WriteString("本书明确排除的题材元素：")
 		b.WriteString(strings.Join(forbidden, "、"))

@@ -213,7 +213,19 @@ func assessArchitectReadiness(dir string) architectReadiness {
 			issues = append(issues, fmt.Sprintf("layered_outline 规划总章数=%d 与 progress.total_chapters=%d 不一致", layeredTotal, progress.TotalChapters))
 		}
 		if min, max, ok := architectChapterRangeFromPremise(premise); ok && (layeredTotal < min || layeredTotal > max) {
-			issues = append(issues, fmt.Sprintf("layered_outline 规划总章数=%d 超出 premise 声明范围 %d-%d 章", layeredTotal, min, max))
+			// A changed declared scale makes the boundary outline stale. Until a plan is
+			// published (no outline-all receipt) that outline is only the pre-plan
+			// skeleton, and outline-all replans it at the current estimated_scale — so
+			// this is a warning. Once a plan IS published the same contradiction is real
+			// and needs an explicit --rebase-all-chapters, so it stays blocking. Without
+			// this distinction, changing the scale dead-ends: the issue is not
+			// attributable to the auto-repairable world sources and no stage ever replans.
+			message := fmt.Sprintf("layered_outline 规划总章数=%d 超出 premise 声明范围 %d-%d 章", layeredTotal, min, max)
+			if receipt, err := st.LoadOutlineAllExecutionReceipt(); err == nil && receipt == nil {
+				warnings = append(warnings, message+"；尚未发布全书计划，outline-all 将按当前 estimated_scale 重新规划")
+			} else {
+				issues = append(issues, message)
+			}
 		}
 	}
 	if len(outline) > 0 {
