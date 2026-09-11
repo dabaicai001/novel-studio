@@ -10,6 +10,7 @@ import (
 
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
 	"github.com/chenhongyang/novel-studio/internal/domain"
+	"github.com/chenhongyang/novel-studio/internal/models"
 	"github.com/voocel/agentcore"
 )
 
@@ -42,6 +43,46 @@ const planGroundingWindowReserveTokens = 32768
 // of Chinese prose can cost more than one provider token, so the rune budget is
 // half the usable token window.
 const planGroundingRunesPerToken = 2
+
+// planGroundingMaxOutputTokens bounds the reviewer's single structured verdict.
+// Provider-side reasoning spends this same budget before the tool call is
+// emitted, so a narrow budget does not shorten the verdict: it truncates the
+// review and returns no verdict at all.
+const planGroundingMaxOutputTokens = 32768
+
+// planGroundingMinOutputTokens keeps a plausible verdict budget for models the
+// bundled registry reports as very small.
+const planGroundingMinOutputTokens = 6144
+
+// planGroundingOutputBudget resolves the reviewer's output budget: the bundled
+// registry's own output limit when it is smaller than the default, never below
+// the minimum that can carry a verdict.
+func planGroundingOutputBudget(modelName string) int {
+	budget := planGroundingMaxOutputTokens
+	if entry, ok := models.DefaultRegistry().Resolve(strings.TrimSpace(modelName)); ok && entry != nil && entry.MaxTokens > 0 && entry.MaxTokens < budget {
+		budget = entry.MaxTokens
+	}
+	if budget < planGroundingMinOutputTokens {
+		budget = planGroundingMinOutputTokens
+	}
+	return budget
+}
+
+// planGroundingReviewTruncated reports whether the reviewer spent its whole
+// output budget without emitting the verdict, which is a local transport
+// failure rather than a grounding verdict about the plan.
+func planGroundingReviewTruncated(response *agentcore.LLMResponse, budget int) bool {
+	if response == nil {
+		return false
+	}
+	if response.Message.StopReason == agentcore.StopReasonLength {
+		return true
+	}
+	if usage := response.Message.Usage; usage != nil && budget > 0 && usage.Output >= budget {
+		return true
+	}
+	return false
+}
 
 // planGroundingRuneCeiling derives the exact-packet rune budget from the
 // resolved context window of the model that will actually serve the verdict.

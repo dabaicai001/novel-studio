@@ -244,6 +244,42 @@ func TestLargeWindowReviewerAcceptsPacketBeyondTheHistoricalCeiling(t *testing.T
 	}
 }
 
+// A reasoning provider spends the output budget on internal reasoning before it
+// emits the verdict tool call. A budget that only fits the reasoning truncated
+// every project-all finalize on a real run, and the failure surfaced as the
+// misleading "must return exactly one structured verdict". Truncation is a local
+// transport failure: it must stop the paid retry loop and name its cause.
+func TestTruncatedReviewerOutputIsALocalBudgetFailure(t *testing.T) {
+	if planGroundingMaxOutputTokens <= planGroundingMinOutputTokens {
+		t.Fatal("verdict budget leaves no room for provider-side reasoning")
+	}
+	if got := planGroundingOutputBudget("unlisted-model"); got != planGroundingMaxOutputTokens {
+		t.Fatalf("unlisted model budget=%d want %d", got, planGroundingMaxOutputTokens)
+	}
+	if got := planGroundingOutputBudget("deepseek-v4-flash"); got != planGroundingMaxOutputTokens {
+		t.Fatalf("large-output model budget=%d want %d", got, planGroundingMaxOutputTokens)
+	}
+	if got := planGroundingOutputBudget("deepseek-chat"); got != 16000 {
+		t.Fatalf("registry-bounded model budget=%d want its own output limit 16000", got)
+	}
+	truncated := &groundingProbeModel{args: "", truncate: true, output: planGroundingMaxOutputTokens}
+	input := domain.PlanGroundingInput{Policy: domain.PlanGroundingPolicyV1, Plan: domain.ChapterPlan{Chapter: 1, Goal: "计划"}}
+	_, err := runPlanGroundingReviewWithin(context.Background(), truncated, agentcore.ThinkingHigh, input, 0, planGroundingMaxOutputTokens)
+	var budget *PlanGroundingInputBudgetError
+	if !errors.As(err, &budget) || !strings.Contains(err.Error(), "truncated") || !strings.Contains(err.Error(), "no findings were produced") {
+		t.Fatalf("truncation was not reported as a local budget failure: %v", err)
+	}
+	if truncated.calls != 1 {
+		t.Fatal("truncation test did not reach the reviewer")
+	}
+	// A reviewer that answers without any verdict but is not truncated stays a
+	// transport error, not a budget stop.
+	empty := &groundingProbeModel{args: ""}
+	if _, err := runPlanGroundingReviewWithin(context.Background(), empty, agentcore.ThinkingHigh, input, 0, planGroundingMaxOutputTokens); err == nil || errors.As(err, &budget) {
+		t.Fatalf("truncation classification leaked into untruncated answers: %v", err)
+	}
+}
+
 type groundingExecutedBudgetLookalike struct{ cause error }
 
 func (e *groundingExecutedBudgetLookalike) Error() string                      { return e.cause.Error() }

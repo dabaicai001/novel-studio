@@ -15,12 +15,24 @@ type groundingProbeModel struct {
 	calls    int
 	messages []agentcore.Message
 	specs    []agentcore.ToolSpec
+	// truncate models a reviewer that spent its whole output budget on provider
+	// reasoning and therefore emitted no verdict tool call at all.
+	truncate bool
+	output   int
 }
 
 func (m *groundingProbeModel) Generate(_ context.Context, messages []agentcore.Message, specs []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	m.calls++
 	m.messages = messages
 	m.specs = specs
+	if m.truncate {
+		return &agentcore.LLMResponse{Message: agentcore.Message{
+			Role:       agentcore.RoleAssistant,
+			Content:    []agentcore.ContentBlock{agentcore.TextBlock("正在核对裁决与计划")},
+			StopReason: agentcore.StopReasonLength,
+			Usage:      &agentcore.Usage{Output: m.output},
+		}}, nil
+	}
 	return &agentcore.LLMResponse{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: []agentcore.ContentBlock{agentcore.ToolCallBlock(agentcore.ToolCall{ID: "verdict", Name: "submit_plan_grounding_verdict", Args: json.RawMessage(m.args)})}}}, nil
 }
 func (*groundingProbeModel) GenerateStream(context.Context, []agentcore.Message, []agentcore.ToolSpec, ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {

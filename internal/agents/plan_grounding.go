@@ -62,7 +62,7 @@ func NewPlanGroundingReviewer(cfg bootstrap.Config, models *bootstrap.ModelSet, 
 			return tools.PlanGroundingReviewer{}, err
 		}
 		ceiling := planGroundingRuneCeilingFor(cfg, snapshot.Name)
-		return newSnapshotPlanGroundingReviewer(snapshot, requestedThinking, record, ceiling), nil
+		return newSnapshotPlanGroundingReviewer(snapshot, requestedThinking, record, ceiling, planGroundingOutputBudget(snapshot.Name)), nil
 	}
 	reviewer, err := resolve()
 	if err != nil {
@@ -77,18 +77,21 @@ func NewPlanGroundingReviewer(cfg bootstrap.Config, models *bootstrap.ModelSet, 
 			return tools.PlanGroundingReviewer{}, err
 		}
 		ceiling := planGroundingRuneCeilingFor(cfg, snapshot.Name)
-		return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, ceiling, sim.CharacterActivation != nil, domain.HasCharacterWorkArtifactPolicyV1(sim.Sources)), nil
+		return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, ceiling, planGroundingOutputBudget(snapshot.Name), sim.CharacterActivation != nil, domain.HasCharacterWorkArtifactPolicyV1(sim.Sources)), nil
 	}
 	return reviewer
 }
 
-func newSnapshotPlanGroundingReviewer(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, derivedCeiling int) tools.PlanGroundingReviewer {
-	return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, derivedCeiling, false)
+func newSnapshotPlanGroundingReviewer(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, derivedCeiling, outputBudget int) tools.PlanGroundingReviewer {
+	return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, derivedCeiling, outputBudget, false)
 }
 
-func newSnapshotPlanGroundingReviewerMode(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, derivedCeiling int, activation bool, artifactModes ...bool) tools.PlanGroundingReviewer {
+func newSnapshotPlanGroundingReviewerMode(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, derivedCeiling, outputBudget int, activation bool, artifactModes ...bool) tools.PlanGroundingReviewer {
 	artifacts := len(artifactModes) > 0 && artifactModes[0]
 	model, provider, name := snapshot.Model, snapshot.Provider, snapshot.Name
+	if outputBudget <= 0 {
+		outputBudget = planGroundingOutputBudget(name)
+	}
 	thinking, _ := ResolveThinkingForModel(model, requestedThinking)
 	protocol := planGroundingProtocolDigest()
 	if activation {
@@ -122,23 +125,27 @@ func newSnapshotPlanGroundingReviewerMode(snapshot bootstrap.ModelSnapshot, requ
 				accounted = NewAuditedUsageModel(ctx, model, "plan_grounding", provider, name, "plan_grounding", record, hooks)
 			}
 		}
-		verdict, err := runPlanGroundingReviewWithin(ctx, accounted, thinking, input, derivedCeiling)
+		verdict, err := runPlanGroundingReviewWithin(ctx, accounted, thinking, input, derivedCeiling, outputBudget)
 		return verdict, errors.Join(err, projectedAccountingAfter(ctx))
 	}}
 }
 
 func runPlanGroundingReview(ctx context.Context, model agentcore.ChatModel, thinking agentcore.ThinkingLevel, input domain.PlanGroundingInput) (domain.PlanGroundingVerdict, error) {
-	return runPlanGroundingReviewWithin(ctx, model, thinking, input, 0)
+	return runPlanGroundingReviewWithin(ctx, model, thinking, input, 0, planGroundingMinOutputTokens)
 }
 
 // runPlanGroundingReviewWithin reviews one exact packet. derivedCeiling is the
 // reviewer's context-window-derived rune budget; zero keeps the historical
 // conservative ceiling, so an unresolved window can never widen evidence
-// transport.
-func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel, thinking agentcore.ThinkingLevel, input domain.PlanGroundingInput, derivedCeiling int) (domain.PlanGroundingVerdict, error) {
+// transport. outputBudget is the reviewer's single-verdict output budget, which
+// must also cover provider-side reasoning.
+func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel, thinking agentcore.ThinkingLevel, input domain.PlanGroundingInput, derivedCeiling, outputBudget int) (domain.PlanGroundingVerdict, error) {
 	var verdict domain.PlanGroundingVerdict
 	if model == nil {
 		return verdict, fmt.Errorf("plan grounding model unavailable")
+	}
+	if outputBudget <= 0 {
+		outputBudget = planGroundingMinOutputTokens
 	}
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -178,7 +185,7 @@ func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel
 			messages = append(messages, agentcore.UserMsg(string(part)))
 		}
 	}
-	response, err := model.Generate(ctx, messages, []agentcore.ToolSpec{planGroundingToolSpec()}, agentcore.WithThinking(thinking), agentcore.WithMaxTokens(6144))
+	response, err := model.Generate(ctx, messages, []agentcore.ToolSpec{planGroundingToolSpec()}, agentcore.WithThinking(thinking), agentcore.WithMaxTokens(outputBudget))
 	if err != nil {
 		return verdict, classifyPlanGroundingInputBudgetError(model, input, err)
 	}
@@ -187,6 +194,12 @@ func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel
 	}
 	calls := response.Message.ToolCalls()
 	if len(calls) != 1 || calls[0].Name != "submit_plan_grounding_verdict" || calls[0].ArgsInvalid {
+		// A reviewer that spent its whole output budget on internal reasoning
+		// never reached the tool call: that is a local transport failure, not a
+		// grounding verdict, and retrying it unchanged only burns paid reviews.
+		if planGroundingReviewTruncated(response, outputBudget) {
+			return verdict, &PlanGroundingInputBudgetError{Cause: fmt.Errorf("plan grounding review was truncated at its %d-token output budget before returning the single structured verdict; the reviewer's reasoning consumed the whole budget; no findings were produced; raise the reviewer output budget or reduce the exact packet", outputBudget)}
+		}
 		return verdict, fmt.Errorf("plan grounding must return exactly one structured verdict")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(calls[0].Args))
