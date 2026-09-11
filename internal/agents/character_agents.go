@@ -1590,7 +1590,7 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 	usage, err := runCharacterAgentTerminalLoop(
 		withCharacterToolDiagnosticScope(ctx, usageRecord), model, characterPrompt,
 		"你是 "+observation.Character+"。这是你唯一可见的观察包：\n<character_observation_packet>\n"+string(raw)+"\n</character_observation_packet>\n现在只调用 submit_character_decision。",
-		executionTool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("character", 6), 8), roleThinking(cfg, "character"), guard,
+		executionTool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("character", 10), characterAgentTurnCeiling), roleThinking(cfg, "character"), guard,
 		characterCyclePromptCacheKey(agentPromptCacheKey("character", st.Dir(), observation.GenerationID, fmt.Sprint(observation.Chapter), fmt.Sprint(observation.Round), observation.AgentID), proofs),
 		st,
 	)
@@ -1616,6 +1616,13 @@ func runOneCharacterAgentWithDispatchView(ctx context.Context, cfg bootstrap.Con
 // killed chapter 1 of 114. Three reminders match subagentMaxConsecutiveBlocks;
 // MaxTurns still bounds each loop.
 const characterAgentReminderBudget = 3
+
+// characterAgentTurnCeiling bounds character/arbiter turns. These loops re-emit a
+// whole receipt per attempt and their prompts are small (tens of thousands of
+// tokens), so extra turns are cheap; the earlier ceiling of 8 (default 6) ran out
+// while the arbiter was still repairing one exact-copy field per turn and killed
+// chapter 1 with "max turns (6) reached".
+const characterAgentTurnCeiling = 12
 
 func runCharacterAgentTerminalLoop(
 	ctx context.Context,
@@ -1798,7 +1805,7 @@ func runWorldArbitration(ctx context.Context, cfg bootstrap.Config, st *store.St
 	usage, err := runCharacterAgentTerminalLoop(
 		withCharacterToolDiagnosticScope(ctx, usageRecord), model, arbiterPrompt,
 		userPrompt,
-		executionTool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("world_arbiter", 6), 8), roleThinking(cfg, "world_arbiter"), guard,
+		executionTool, tool.Name(), cappedMaxTurns(cfg.ResolveMaxTurns("world_arbiter", 10), characterAgentTurnCeiling), roleThinking(cfg, "world_arbiter"), guard,
 		characterCyclePromptCacheKey(agentPromptCacheKey("world_arbiter", st.Dir(), inputs.Stimulus.GenerationID, fmt.Sprint(inputs.Stimulus.Chapter), fmt.Sprint(round)), proofs),
 		st,
 	)

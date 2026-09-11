@@ -937,6 +937,7 @@ func finalizeWorldArbitrationReceiptWithPriorSources(r WorldArbitrationReceipt, 
 			knownMechanisms[id] = struct{}{}
 		}
 	}
+	var intentRewriteIssues []string
 	for i := range r.Resolutions {
 		resolution := &r.Resolutions[i]
 		resolution.MechanismRefs = normalizeV2Strings(resolution.MechanismRefs)
@@ -945,7 +946,13 @@ func finalizeWorldArbitrationReceiptWithPriorSources(r WorldArbitrationReceipt, 
 			return r, fmt.Errorf("resolution for %s is not bound to a proposal", resolution.AgentID)
 		}
 		if resolution.Decision != proposal.Decision || resolution.IntendedAction != proposal.IntendedAction {
-			return r, characterArbitrationIntentRewriteError(proposal, *resolution)
+			// Collect every mismatched resolution instead of returning on the first
+			// one: the arbiter re-emits the whole receipt, and a single-issue
+			// rejection makes it repair one character per turn until the loop's turn
+			// budget is gone (measured on chapter 1: six turns, all rejected, then
+			// "max turns (6) reached" — the last two on 青萍's intended_action).
+			intentRewriteIssues = append(intentRewriteIssues, characterArbitrationIntentRewriteError(proposal, *resolution).Error())
+			continue
 		}
 		for _, ref := range resolution.MechanismRefs {
 			if _, ok := knownMechanisms[ref]; !ok {
@@ -973,6 +980,13 @@ func finalizeWorldArbitrationReceiptWithPriorSources(r WorldArbitrationReceipt, 
 		default:
 			return r, fmt.Errorf("resolution for %s has invalid outcome %q", resolution.AgentID, resolution.Outcome)
 		}
+	}
+	if len(intentRewriteIssues) > 0 {
+		if len(intentRewriteIssues) == 1 {
+			return r, fmt.Errorf("%s", intentRewriteIssues[0])
+		}
+		return r, fmt.Errorf("%s\n[本轮另有 %d 条 resolution 同样与提案不符，必须一次性全部逐字修正；以下每条都要对照 expected_json 复制原文]\n%s",
+			intentRewriteIssues[0], len(intentRewriteIssues)-1, strings.Join(intentRewriteIssues[1:], "\n"))
 	}
 	if len(seen) != len(byAgent) {
 		return r, fmt.Errorf("world arbitration does not resolve every active proposal")
