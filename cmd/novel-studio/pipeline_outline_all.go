@@ -100,7 +100,7 @@ func pipelineOutlineAll(opts cliOptions, flags pipelineFlags) (returnErr error) 
 			return fmt.Errorf("--outline-repair-file requires a fresh outline-all; existing completed outline-all must first be retired with --rebase-all-chapters")
 		}
 		if _, err := verifyPipelineOutlineAllReceiptAndArtifacts(cfg.OutputDir); err != nil {
-			return err
+			return pipelineOutlineAllStalePublishedReceiptError(live, err)
 		}
 		return nil
 	}
@@ -775,6 +775,38 @@ func ensurePipelineOutlineAllReceipt(
 // applyFrozenStructurePlanTarget overlays the model-chosen totals from a frozen
 // receipt onto the in-memory scale target so every later planner/validator sees
 // the plan's volume/chapter counts rather than the provisional midpoint.
+// pipelineOutlineAllStalePublishedReceiptError turns an opaque verifier drift
+// failure into an actionable one. A published outline-all receipt is bound to the
+// foundation it was built from, so editing the author's foundation
+// (characters.json / world files / premise) makes it unverifiable; the stage then
+// failed with only "refreshed readiness digest drift at meta/...", which names
+// neither the cause nor the single supported recovery (`--rebase-all-chapters`,
+// required by the outline-repair entry point). This reports both, plus whether
+// that recovery can lose prose, so the decision needs no source reading.
+//
+// Retiring the receipt automatically is deliberately NOT done here: for a book
+// with written chapters the rebase archives accepted canon, which must stay an
+// explicit operator decision.
+func pipelineOutlineAllStalePublishedReceiptError(live *store.Store, verifyErr error) error {
+	message := verifyErr.Error()
+	stale := strings.Contains(message, "refreshed readiness digest drift") ||
+		strings.Contains(message, "frozen context root drifted") ||
+		strings.Contains(message, "final layered digest drift") ||
+		strings.Contains(message, "final flat digest drift") ||
+		(strings.Contains(message, "foundation") && strings.Contains(message, "drift"))
+	if !stale || live == nil {
+		return verifyErr
+	}
+	written := 0
+	if progress, err := live.Progress.Load(); err == nil && progress != nil {
+		written = len(progress.CompletedChapters)
+	}
+	if written > 0 {
+		return fmt.Errorf("已发布的 outline-all 回执与当前 foundation 不一致（%v）：本书已写完 %d 章，作废重推会把这些正文归档，请先确认——确认后运行 --rebase-all-chapters 作废旧回执并按当前 foundation 重推全书大纲", verifyErr, written)
+	}
+	return fmt.Errorf("已发布的 outline-all 回执与当前 foundation 不一致（%v）：当前正史仍在第 0 章、没有正文可归档，可以安全地运行 --rebase-all-chapters 作废旧回执，并按当前 foundation 重推全书大纲", verifyErr)
+}
+
 func applyFrozenStructurePlanTarget(target domain.BookScaleTarget, receipt *domain.OutlineAllExecutionReceipt) domain.BookScaleTarget {
 	target.TargetVolumes = receipt.TargetVolumes
 	target.TargetChapters = receipt.TargetChapters
