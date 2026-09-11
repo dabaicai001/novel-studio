@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/chenhongyang/novel-studio/internal/domain"
 )
@@ -82,6 +83,24 @@ func normalizeArbitrationResolutions(inputs []arbitrationResolutionInput, stimul
 			return nil, fmt.Errorf("resolution character does not match bound actor")
 		}
 		resolution.Character = proposal.Character
+		// The decision and its intent belong to the character agent, not to the
+		// arbiter: an arbitration that paraphrases them rewrites another actor's
+		// choice instead of reconciling the world. The host therefore owns these two
+		// fields exactly as it owns Character above and substitutes the bound
+		// proposal's text (an arbiter that genuinely disagrees must say so through
+		// Conflicts, which re-opens a revision round).
+		//
+		// Rejecting instead made the whole project-all stage fail on chapter 1:
+		// every retry re-emits the entire receipt, so the arbiter repaired one
+		// character per turn ("arbiter rewrote intent ... intended_action must
+		// exactly match original proposal.intended_action") until MaxTurns.
+		if resolution.Decision != proposal.Decision || resolution.IntendedAction != proposal.IntendedAction {
+			fmt.Fprintf(os.Stderr,
+				"[world-arbitration] 宿主以提案原文覆盖被改写的 decision/intended_action： agent=%s character=%s\n",
+				proposal.AgentID, proposal.Character)
+			resolution.Decision = proposal.Decision
+			resolution.IntendedAction = proposal.IntendedAction
+		}
 		var postInput characterPhysicalPostStateInput
 		if err := decodePhysicalInput(input.PostState, &postInput); err != nil {
 			return nil, fmt.Errorf("post_state %s: %w", resolution.AgentID, err)
@@ -278,8 +297,18 @@ func fillReceivedFactFromSource(fact domain.CharacterReceivedFactV2, owner domai
 	if text == "" || kind == "" {
 		return fact, fmt.Errorf("received fact source is not present in the bound communication/document")
 	}
-	if fact.SourceProposalDigest != "" && fact.SourceProposalDigest != digest || fact.Kind != "" && fact.Kind != kind || fact.Text != "" && fact.Text != text {
-		return fact, fmt.Errorf("received fact cannot alter immutable source content or identity")
+	// The host owns kind/text/SourceProposalDigest: they are derived from the bound
+	// communication or readable document just above, and the very next assignment
+	// overwrites whatever the model sent. Rejecting a paraphrase here fails a
+	// submission whose immutable content the host restores anyway (measured: two
+	// rejections on chapter 1 of project-all). The binding checks stay — the source
+	// must still exist and belong to this owner — but a differing echo is recorded,
+	// not punished.
+	if fact.SourceProposalDigest != "" && fact.SourceProposalDigest != digest ||
+		fact.Kind != "" && fact.Kind != kind || fact.Text != "" && fact.Text != text {
+		fmt.Fprintf(os.Stderr,
+			"[world-arbitration] 宿主以绑定原文覆盖 received_fact 的 kind/text/digest： agent=%s source=%s\n",
+			owner.AgentID, fact.SourceID)
 	}
 	fact.SourceProposalDigest, fact.Kind, fact.Text = digest, kind, text
 	if fact.ID == "" {

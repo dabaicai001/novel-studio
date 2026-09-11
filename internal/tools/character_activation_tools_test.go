@@ -177,7 +177,12 @@ func TestSubmitCharacterActivationPersistsOnlyBoundCycle(t *testing.T) {
 	}
 }
 
-func TestResolveCharacterActivationRejectsAlteredIntentBeforePersistence(t *testing.T) {
+// The decision belongs to the character agent, so the host restores it instead of
+// rejecting the reconciliation (see normalizeArbitrationResolutions): rejecting
+// made the arbiter re-emit the whole receipt and repair one character per turn
+// until the turn budget was gone. An altered proposal is still rejected by the
+// constructor — that is a different actor's proposal identity, not a paraphrase.
+func TestResolveCharacterActivationNormalizesAlteredIntentBeforePersistence(t *testing.T) {
 	st, session, cycle, proof := activationToolFixture(t, true)
 	e := cycle.Evidence
 	tool, err := NewResolveCharacterActivationTool(st, session, e.Stimulus, e.Activation, e.Proposals, e.ProtocolDigest, nil, 1)
@@ -186,11 +191,32 @@ func TestResolveCharacterActivationRejectsAlteredIntentBeforePersistence(t *test
 	}
 	raw := activationArbiterArgs(t, cycle)
 	bad := strings.Replace(string(raw), `"decision":"继续检查"`, `"decision":"交出燃油"`, 1)
-	if _, err := tool.Execute(context.Background(), json.RawMessage(bad)); err == nil {
-		t.Fatal("arbiter rewrote actor intent")
+	if bad == string(raw) {
+		t.Fatal("fixture decision text changed; this test no longer exercises a rewrite")
 	}
-	if receipt, err := proof.LoadArbitration(e.GenerationID, 1, 1); err != nil || receipt != nil {
-		t.Fatal("invalid cycle receipt persisted")
+	if _, err := tool.Execute(context.Background(), json.RawMessage(bad)); err != nil {
+		t.Fatalf("host-owned decision must be restored, not rejected: %v", err)
+	}
+	receipt, err := proof.LoadArbitration(e.GenerationID, 1, 1)
+	if err != nil || receipt == nil {
+		t.Fatalf("normalized cycle receipt missing: %v", err)
+	}
+	restored := false
+	for _, resolution := range receipt.Resolutions {
+		if resolution.AgentID != e.Proposals[0].AgentID {
+			continue
+		}
+		restored = true
+		if resolution.Decision != e.Proposals[0].Decision {
+			t.Fatalf("altered decision survived normalization: %q", resolution.Decision)
+		}
+	}
+	if !restored {
+		t.Fatal("normalized cycle receipt lost the bound resolution")
+	}
+	stored, _ := json.Marshal(receipt)
+	if strings.Contains(string(stored), "交出燃油") {
+		t.Fatal("altered decision leaked into the stored receipt")
 	}
 	altered := e.Proposals[0]
 	altered.Decision = "改为离开"
