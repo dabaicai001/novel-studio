@@ -289,7 +289,7 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 			case "artifact_write":
 				if !single && r.ArtifactRef == "" { // New expected artifact.
 					if len(r.ResourceRefs) != 0 || len(r.MaterialInputs) == 0 {
-						return fmt.Errorf("new expected artifact requires existing material allocation, not an invented resource ID")
+						return fmt.Errorf("new expected artifact requires existing material allocation, not an invented resource ID；若 world_state 里确实没有可分配的既有材料资源，本项唯一合法的落地方式是把该 material_check 标成 not_required，并在 operation 文本里注明正式阶段再以 artifact_write 逐项执行；不要标 available、不要编造 resource_id，也不要用一门普通文档冒充真实产物（上一版通过复核的预演正是这样处理名册的）")
 					}
 					creator = r.ActorRef
 					seenMaterials := map[string]bool{}
@@ -318,7 +318,7 @@ func validateArcRehearsalCapabilitiesV1(input ArcRehearsalInput, body ArcRehears
 					creator = resource.Artifact.CreatorAgentID
 				}
 				if creator == "" || r.Kind == "artifact_read" && !m.RequiresReadable {
-					return fmt.Errorf("artifact read/sign requires an actual artifact or earlier expected write, not an ordinary document")
+					return fmt.Errorf("artifact read/sign requires an actual artifact or earlier expected write, not an ordinary document；若本弧只打算把该文书的写—读—签—交链留到正式阶段，就把该 material_check 标成 not_required 并注明由 artifact_write／artifact_read／artifact_sign 在正式阶段逐项执行，不要引用不存在的 artifact_ref，也不要把普通文档当成真实产物")
 				}
 			}
 			if r.ArtifactRef != "" {
