@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"unicode/utf8"
 
 	"github.com/chenhongyang/novel-studio/internal/bootstrap"
@@ -185,24 +186,57 @@ func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel
 			messages = append(messages, agentcore.UserMsg(string(part)))
 		}
 	}
-	response, err := model.Generate(ctx, messages, []agentcore.ToolSpec{planGroundingToolSpec()}, agentcore.WithThinking(thinking), agentcore.WithMaxTokens(outputBudget))
-	if err != nil {
-		return verdict, classifyPlanGroundingInputBudgetError(model, input, err)
-	}
-	if response == nil {
-		return verdict, fmt.Errorf("plan grounding returned no response")
-	}
-	calls := response.Message.ToolCalls()
-	if len(calls) != 1 || calls[0].Name != "submit_plan_grounding_verdict" || calls[0].ArgsInvalid {
-		// A reviewer that spent its whole output budget on internal reasoning
-		// never reached the tool call: that is a local transport failure, not a
-		// grounding verdict, and retrying it unchanged only burns paid reviews.
-		if planGroundingReviewTruncated(response, outputBudget) {
-			return verdict, &PlanGroundingInputBudgetError{Cause: fmt.Errorf("plan grounding review was truncated at its %d-token output budget before returning the single structured verdict; the reviewer's reasoning consumed the whole budget; no findings were produced; raise the reviewer output budget or reduce the exact packet", outputBudget)}
+	verdict, err = runPlanGroundingReviewWithRepair(ctx, model, thinking, input, messages, outputBudget)
+	return verdict, err
+}
+
+// planGroundingVerdictRepairAttempts bounds how many times the reviewer may be
+// re-asked to make its own verdict verifiable. A verdict that cannot be verified
+// is the reviewer's defect, so it must be repaired here: routing it to the
+// Planner, which cannot quote the reviewer's evidence for it, turns one bad
+// excerpt into an unbounded paid planning loop.
+const planGroundingVerdictRepairAttempts = 1
+
+func runPlanGroundingReviewWithRepair(ctx context.Context, model agentcore.ChatModel, thinking agentcore.ThinkingLevel, input domain.PlanGroundingInput, messages []agentcore.Message, outputBudget int) (domain.PlanGroundingVerdict, error) {
+	var verdict domain.PlanGroundingVerdict
+	specs := []agentcore.ToolSpec{planGroundingToolSpec()}
+	for attempt := 0; ; attempt++ {
+		response, err := model.Generate(ctx, messages, specs, agentcore.WithThinking(thinking), agentcore.WithMaxTokens(outputBudget))
+		if err != nil {
+			return verdict, classifyPlanGroundingInputBudgetError(model, input, err)
 		}
-		return verdict, fmt.Errorf("plan grounding must return exactly one structured verdict")
+		if response == nil {
+			return verdict, fmt.Errorf("plan grounding returned no response")
+		}
+		calls := response.Message.ToolCalls()
+		if len(calls) != 1 || calls[0].Name != "submit_plan_grounding_verdict" || calls[0].ArgsInvalid {
+			// A reviewer that spent its whole output budget on internal reasoning
+			// never reached the tool call: that is a local transport failure, not a
+			// grounding verdict, and retrying it unchanged only burns paid reviews.
+			if planGroundingReviewTruncated(response, outputBudget) {
+				return verdict, &PlanGroundingInputBudgetError{Cause: fmt.Errorf("plan grounding review was truncated at its %d-token output budget before returning the single structured verdict; the reviewer's reasoning consumed the whole budget; no findings were produced; raise the reviewer output budget or reduce the exact packet", outputBudget)}
+			}
+			return verdict, fmt.Errorf("plan grounding must return exactly one structured verdict")
+		}
+		verdict, err = decodePlanGroundingVerdict(calls[0].Args)
+		if err != nil {
+			return verdict, err
+		}
+		if _, err := domain.FinalizePlanGroundingReceipt(input, verdict); err != nil {
+			if attempt >= planGroundingVerdictRepairAttempts {
+				return verdict, fmt.Errorf("plan grounding verdict failed host verification after %d repair attempt(s): %w", attempt, err)
+			}
+			slog.Warn("[plan-grounding] 裁决未通过宿主校验，要求复核者原样重交", "attempt", attempt+1, "err", err)
+			messages = append(messages, agentcore.UserMsg(planGroundingVerdictRepairFeedback(verdict, err)))
+			continue
+		}
+		return verdict, nil
 	}
-	decoder := json.NewDecoder(bytes.NewReader(calls[0].Args))
+}
+
+func decodePlanGroundingVerdict(args []byte) (domain.PlanGroundingVerdict, error) {
+	var verdict domain.PlanGroundingVerdict
+	decoder := json.NewDecoder(bytes.NewReader(args))
 	decoder.DisallowUnknownFields()
 	var wire struct {
 		Pass     *bool                          `json:"pass"`
@@ -218,8 +252,22 @@ func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return verdict, fmt.Errorf("plan grounding has trailing verdict data")
 	}
-	if _, err := domain.FinalizePlanGroundingReceipt(input, verdict); err != nil {
-		return verdict, err
-	}
 	return verdict, nil
+}
+
+// planGroundingVerdictRepairFeedback returns the reviewer's own rejected verdict
+// plus the exact host rule it broke, so one bounded re-ask can make it
+// verifiable without weakening any substantive standard.
+func planGroundingVerdictRepairFeedback(verdict domain.PlanGroundingVerdict, cause error) string {
+	encoded, err := json.Marshal(verdict)
+	if err != nil {
+		encoded = []byte("{}")
+	}
+	return fmt.Sprintf(`宿主校验拒绝了上一次 submit_plan_grounding_verdict，裁决未生效：%s。
+上次提交的裁决原文：%s
+请只调用 submit_plan_grounding_verdict 一次，重新提交裁决：
+- pass 语义不得改变（无实质矛盾 pass=true 且 findings=[]；有矛盾 pass=false 且 1-8 条）。
+- plan_quote / source_quote 必须是所引路径原文的**逐字连续片段**：不得改写、缩写、加省略号、拼接不相邻的句子，也不得引用该路径之外的内容。
+- 无法逐字摘录的条目请整条删除，不要为了凑数改写引文。
+- 若删除后 findings 为空而矛盾确实存在，请换一个能逐字摘录的 plan_path/source_path 重新引用同一处矛盾。`, cause, string(encoded))
 }
