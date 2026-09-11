@@ -180,6 +180,70 @@ func TestActivationGroundingUnknownProviderAndLegacyKeepConservativeLimits(t *te
 	}
 }
 
+// The historical 82000-rune ceiling assumed a small provider window and
+// dead-ended real chapter planning on providers that serve far more. The packet
+// budget must follow the reviewer's resolved window, while an unresolved window
+// keeps the historical ceiling so evidence transport is never widened blind.
+func TestPlanGroundingRuneCeilingFollowsResolvedReviewerWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window int
+		want   int
+	}{
+		{"unresolved window", 0, 0},
+		{"window no larger than the historical ceiling", 128000, 0},
+		{"large window", 1048576, planGroundingAbsoluteRuneCeiling},
+	} {
+		if got := planGroundingRuneCeiling(tc.window); got != tc.want {
+			t.Fatalf("%s: ceiling=%d want %d", tc.name, got, tc.want)
+		}
+	}
+	configured := bootstrap.Config{ContextWindows: map[string]int{"judge-large": 1048576}, Roles: map[string]bootstrap.RoleConfig{"world_arbiter": {Model: "judge-large"}}}
+	if got := planGroundingRuneCeilingFor(configured, "judge-large"); got != planGroundingAbsoluteRuneCeiling {
+		t.Fatalf("configured window did not widen the packet: %d", got)
+	}
+	if got := planGroundingRuneCeilingFor(configured, ""); got != planGroundingAbsoluteRuneCeiling {
+		t.Fatalf("role model window was not consulted: %d", got)
+	}
+	if got := planGroundingRuneCeilingFor(bootstrap.Config{}, "unlisted-model"); got != 0 {
+		t.Fatalf("engine default window widened evidence transport blind: %d", got)
+	}
+}
+
+func TestLargeWindowReviewerAcceptsPacketBeyondTheHistoricalCeiling(t *testing.T) {
+	payload := strings.Repeat("源", 20000)
+	cfg := bootstrap.Config{ContextWindows: map[string]int{"judge-large": 1048576}}
+	large := &groundingProbeModel{args: `{"pass":true,"findings":[]}`}
+	models := &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("openai", "judge-large", large)}
+	reviewer, err := NewPlanGroundingReviewer(cfg, models, nil).Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := domain.PlanGroundingInput{Policy: domain.PlanGroundingPolicyV1, ReviewProtocol: reviewer.Protocol, Plan: domain.ChapterPlan{Chapter: 1, Goal: payload + "完整计划尾"}}
+	raw, _ := json.Marshal(input)
+	if runes := utf8.RuneCount(raw); runes <= 82000 {
+		t.Fatalf("fixture does not cross the historical ceiling: %d", runes)
+	}
+	verdict, err := reviewer.Review(context.Background(), input)
+	if err != nil || !verdict.Pass || large.calls != 1 {
+		t.Fatalf("large-window review failed: calls=%d err=%v", large.calls, err)
+	}
+	if len(large.messages) != 5 || !strings.Contains(large.messages[4].TextContent(), "完整计划尾") {
+		t.Fatal("exact plan evidence was not transported whole")
+	}
+	blind := &groundingProbeModel{args: `{"pass":true,"findings":[]}`}
+	models = &bootstrap.ModelSet{Default: bootstrap.NewSwappableModel("openai", "unlisted-model", blind)}
+	unresolved, err := NewPlanGroundingReviewer(bootstrap.Config{}, models, nil).Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ReviewProtocol = unresolved.Protocol
+	var budget *PlanGroundingInputBudgetError
+	if _, err := unresolved.Review(context.Background(), input); !errors.As(err, &budget) || blind.calls != 0 {
+		t.Fatalf("unresolved window stopped enforcing the historical ceiling: calls=%d err=%v", blind.calls, err)
+	}
+}
+
 type groundingExecutedBudgetLookalike struct{ cause error }
 
 func (e *groundingExecutedBudgetLookalike) Error() string                      { return e.cause.Error() }

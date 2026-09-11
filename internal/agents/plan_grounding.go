@@ -61,7 +61,8 @@ func NewPlanGroundingReviewer(cfg bootstrap.Config, models *bootstrap.ModelSet, 
 		if err != nil {
 			return tools.PlanGroundingReviewer{}, err
 		}
-		return newSnapshotPlanGroundingReviewer(snapshot, requestedThinking, record), nil
+		ceiling := planGroundingRuneCeilingFor(cfg, snapshot.Name)
+		return newSnapshotPlanGroundingReviewer(snapshot, requestedThinking, record, ceiling), nil
 	}
 	reviewer, err := resolve()
 	if err != nil {
@@ -75,16 +76,17 @@ func NewPlanGroundingReviewer(cfg bootstrap.Config, models *bootstrap.ModelSet, 
 		if err != nil {
 			return tools.PlanGroundingReviewer{}, err
 		}
-		return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, sim.CharacterActivation != nil, domain.HasCharacterWorkArtifactPolicyV1(sim.Sources)), nil
+		ceiling := planGroundingRuneCeilingFor(cfg, snapshot.Name)
+		return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, ceiling, sim.CharacterActivation != nil, domain.HasCharacterWorkArtifactPolicyV1(sim.Sources)), nil
 	}
 	return reviewer
 }
 
-func newSnapshotPlanGroundingReviewer(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder) tools.PlanGroundingReviewer {
-	return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, false)
+func newSnapshotPlanGroundingReviewer(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, derivedCeiling int) tools.PlanGroundingReviewer {
+	return newSnapshotPlanGroundingReviewerMode(snapshot, requestedThinking, record, derivedCeiling, false)
 }
 
-func newSnapshotPlanGroundingReviewerMode(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, activation bool, artifactModes ...bool) tools.PlanGroundingReviewer {
+func newSnapshotPlanGroundingReviewerMode(snapshot bootstrap.ModelSnapshot, requestedThinking agentcore.ThinkingLevel, record UsageRecorder, derivedCeiling int, activation bool, artifactModes ...bool) tools.PlanGroundingReviewer {
 	artifacts := len(artifactModes) > 0 && artifactModes[0]
 	model, provider, name := snapshot.Model, snapshot.Provider, snapshot.Name
 	thinking, _ := ResolveThinkingForModel(model, requestedThinking)
@@ -120,12 +122,20 @@ func newSnapshotPlanGroundingReviewerMode(snapshot bootstrap.ModelSnapshot, requ
 				accounted = NewAuditedUsageModel(ctx, model, "plan_grounding", provider, name, "plan_grounding", record, hooks)
 			}
 		}
-		verdict, err := runPlanGroundingReview(ctx, accounted, thinking, input)
+		verdict, err := runPlanGroundingReviewWithin(ctx, accounted, thinking, input, derivedCeiling)
 		return verdict, errors.Join(err, projectedAccountingAfter(ctx))
 	}}
 }
 
 func runPlanGroundingReview(ctx context.Context, model agentcore.ChatModel, thinking agentcore.ThinkingLevel, input domain.PlanGroundingInput) (domain.PlanGroundingVerdict, error) {
+	return runPlanGroundingReviewWithin(ctx, model, thinking, input, 0)
+}
+
+// runPlanGroundingReviewWithin reviews one exact packet. derivedCeiling is the
+// reviewer's context-window-derived rune budget; zero keeps the historical
+// conservative ceiling, so an unresolved window can never widen evidence
+// transport.
+func runPlanGroundingReviewWithin(ctx context.Context, model agentcore.ChatModel, thinking agentcore.ThinkingLevel, input domain.PlanGroundingInput, derivedCeiling int) (domain.PlanGroundingVerdict, error) {
 	var verdict domain.PlanGroundingVerdict
 	if model == nil {
 		return verdict, fmt.Errorf("plan grounding model unavailable")
@@ -136,11 +146,13 @@ func runPlanGroundingReview(ctx context.Context, model agentcore.ChatModel, thin
 	}
 	// Activation uses an indivisible exact packet. Only the known Codex
 	// adapter owns a larger configured-window budget (or its unchanged 90k
-	// fallback); other providers retain the conservative historical ceiling.
-	if err := checkPlanGroundingInputBudget(model, input, raw); err != nil {
+	// fallback); other providers derive their budget from the resolved context
+	// window of the model that serves the verdict.
+	logPlanGroundingInputScale(input, utf8.RuneCount(raw), effectivePlanGroundingRuneCeiling(derivedCeiling))
+	if err := checkPlanGroundingInputBudget(model, input, raw, derivedCeiling); err != nil {
 		return verdict, err
 	}
-	// Keep each message below the Codex adapter's single-message budget. Each
+	// Keep each message below the adapter's single-message budget. Each
 	// section preserves its original JSON key so findings cite the same input.
 	messages := []agentcore.Message{agentcore.SystemMsg(planGroundingPrompt)}
 	if input.Activation != nil {
@@ -154,18 +166,14 @@ func runPlanGroundingReview(ctx context.Context, model agentcore.ChatModel, thin
 		}
 		messages = []agentcore.Message{agentcore.SystemMsg(prompt), packet}
 	} else {
-		for _, section := range []any{
-			map[string]any{"policy": input.Policy, "review_protocol": input.ReviewProtocol, "simulation": input.Simulation},
-			map[string]any{"pov_observation": input.POVObservation},
-			map[string]any{"arbitration": input.Arbitration},
-			map[string]any{"plan": input.Plan},
-		} {
-			part, err := json.Marshal(section)
+		sectionCeiling := planGroundingSectionBudget(derivedCeiling)
+		for _, section := range planGroundingExactSections(input) {
+			part, err := json.Marshal(section.value)
 			if err != nil {
 				return verdict, err
 			}
-			if utf8.RuneCount(part) > 44000 {
-				return verdict, &PlanGroundingInputBudgetError{Cause: fmt.Errorf("exact grounding section exceeds single-message budget")}
+			if utf8.RuneCount(part) > sectionCeiling {
+				return verdict, &PlanGroundingInputBudgetError{Cause: fmt.Errorf("exact grounding section %s exceeds single-message budget: section_runes=%d section_ceiling_runes=%d; cannot truncate authoritative evidence", section.name, utf8.RuneCount(part), sectionCeiling)}
 			}
 			messages = append(messages, agentcore.UserMsg(string(part)))
 		}
