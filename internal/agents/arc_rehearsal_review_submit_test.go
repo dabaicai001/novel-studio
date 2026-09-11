@@ -34,7 +34,7 @@ func (m *rehearsalReviewCorrectionModel) Generate(ctx context.Context, messages 
 		}
 		if message.Role == agentcore.RoleTool {
 			raw, _ := json.Marshal(message)
-			m.sawRejection = m.sawRejection || strings.Contains(string(raw), "review cannot rewrite declared execution dependencies")
+			m.sawRejection = m.sawRejection || strings.Contains(string(raw), "rehearsal chapters")
 		}
 	}
 	if payload.Draft != nil {
@@ -44,7 +44,10 @@ func (m *rehearsalReviewCorrectionModel) Generate(ctx context.Context, messages 
 	m.base.bodyFactory = func(input domain.ArcRehearsalInput) domain.ArcRehearsalBody {
 		body := arcRehearsalTestBody(input, false)
 		if rewrite {
-			body.MaterialChecks[0].CapabilityRequirements[0].Key = "rewritten_read_ledger"
+			// Draft-owned material checks are host-merged now, so rewriting one is no
+			// longer a rejection path. Use a field the host does not merge, so this
+			// test still proves a rejected submission can be corrected and resumed.
+			body.Chapters = nil
 		}
 		return body
 	}
@@ -130,9 +133,10 @@ func TestArcRehearsalReviewToolRejectsRewriteAndTamperedHostDraftWithoutSuccess(
 		t.Fatal(err)
 	}
 	tool := &submitArcRehearsalTool{input: input, draft: &draft}
-	if _, err := tool.Execute(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "review cannot rewrite") || tool.body != nil {
-		t.Fatalf("review rewrite succeeded before finalize: %v", err)
+	if _, err := tool.Execute(context.Background(), raw); err != nil {
+		t.Fatalf("host-owned draft dependencies must be merged, not rejected: %v", err)
 	}
+	assertDraftMaterialChecksPreserved(t, draft.Body, *tool.body)
 	if _, err := domain.FinalizeArcRehearsalReport(input, draft, domain.ArcRehearsalReport{Body: changed}); err == nil || !strings.Contains(err.Error(), "review cannot rewrite") {
 		t.Fatal("finalize lost its repeated defensive check")
 	}
