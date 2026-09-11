@@ -98,8 +98,24 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, c
 	if successor, err := st.CharacterAgents.LoadCurrentSuccessorPlan(); err != nil {
 		return input, err
 	} else if successor != nil && successor.BaseCanonChapter == input.BaseCanonChapter && successor.ArcFirstChapter == input.ArcFirstChapter && successor.ArcLastChapter == input.ArcLastChapter {
-		if successor.AcceptedCanonRoot != input.BaseCanonRoot {
-			return input, fmt.Errorf("rehearsal successor has a foreign accepted canon root")
+		// successor.accepted_canon_root was stamped while project-all was running
+		// inside its own workspace store, and this rehearsal reads the live store.
+		// The same root function therefore describes two different staged states
+		// for the same canon, so the two values can never be compared directly:
+		// a legitimate successor was rejected as "foreign" and the arc could not
+		// be rehearsed again. Bind the successor by its registered current
+		// identity and require the live canon to still stand exactly where the
+		// successor was accepted — a store-independent property that the root
+		// comparison was only approximating.
+		progress, err := st.Progress.Load()
+		if err != nil {
+			return input, err
+		}
+		if progress == nil {
+			return input, fmt.Errorf("rehearsal successor requires readable live progress")
+		}
+		if progress.CurrentChapter != successor.BaseCanonChapter {
+			return input, fmt.Errorf("rehearsal successor was accepted at canon chapter %d but the live canon is at chapter %d", successor.BaseCanonChapter, progress.CurrentChapter)
 		}
 		if err := read("meta/character_agents/successors/current.json", nil); err != nil {
 			return input, err
