@@ -27,6 +27,12 @@ type ArcRehearsalInput struct {
 	BookWorld             *BookWorld                           `json:"book_world"`
 	WorldState            *WorldPhysicalStateV2                `json:"world_state"`
 	HardContracts         []string                             `json:"hard_contracts"`
+	// ForwardContracts carries the whole-book contracts (finale direction, long
+	// non-negotiables) as background only: an arc owes the contracts whose payoff
+	// chapter falls inside it, and it can neither satisfy nor honestly assess a
+	// finale it does not contain. They stay visible so the arc can seed
+	// foreshadowing, but they are not contract_checks obligations.
+	ForwardContracts []string `json:"forward_contracts,omitempty"`
 	UserRules             json.RawMessage                      `json:"user_rules"`
 	AcceptedSummaries     []ChapterSummary                     `json:"accepted_summaries,omitempty"`
 	AcceptedEvidence      map[int]string                       `json:"accepted_evidence,omitempty"`
@@ -364,23 +370,20 @@ func FinalizeArcRehearsalReport(input ArcRehearsalInput, draft ArcRehearsalDraft
 	report.BaseCanonChapter, report.BaseCanonRoot, report.SourceRoot = input.BaseCanonChapter, input.BaseCanonRoot, input.SourceRoot
 	report.InputDigest, report.DraftDigest = input.InputDigest, draft.DraftDigest
 	report.ReadyForDetail = true
-	// Contract assessments never block arc readiness, because every arc receives
-	// the same whole-book hard contracts (arc_rehearsal_input.go appends
-	// compass.EndingDirection plus all non_negotiables). A book-level contract such
-	// as the finale or the mid-book dao-heart collapse can only be reported
-	// honestly as "not reachable in this arc" — first as `unresolved`, then, once
-	// the rejection messages pushed for definite verdicts, as
-	// `infeasible_prediction` (measured on arc 1-8: the three finale contracts).
-	// Gating on either label makes the first arc unreachable for any book with
-	// book-level contracts, and discards a rehearsal that in fact succeeded. The
-	// findings stay in the report and in unresolved_items for detailed planning.
-	//
-	// Note this arc's own contract payoffs are empty (map_contracts assigns every
-	// contract to a later arc), so an arc-scoped contract gate would check nothing
-	// here either. Material `missing` remains the hard blocker: it is the verdict
-	// for a resource the arc actually needs and does not have.
+	// Contracts are arc-scoped again (see splitArcRehearsalContracts), so this gate
+	// is meaningful and must stay strict: an arc that reports one of its OWN payoff
+	// obligations as unresolved/unreachable, or a material gap it cannot close, must
+	// not proceed to detailed planning. It had to be relaxed earlier only because
+	// every arc received the whole-book contract list and could honestly report the
+	// finale as unreachable; relaxing it also let real unresolved findings through,
+	// which is exactly what harms a novel's coherence.
+	for _, check := range report.Body.ContractChecks {
+		if check.Assessment == "unresolved" || check.Assessment == "infeasible_prediction" {
+			report.ReadyForDetail = false
+		}
+	}
 	for _, check := range report.Body.MaterialChecks {
-		if check.Status == "missing" {
+		if check.Status == "missing" || check.Status == "unclear" {
 			report.ReadyForDetail = false
 		}
 	}

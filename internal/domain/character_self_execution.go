@@ -258,7 +258,18 @@ func applyCharacterSelfExecutionsV2(receipt WorldArbitrationReceipt, stimulus Wo
 			}
 			task, exists := tasks[execution.TaskID]
 			if !exists {
-				return fmt.Errorf("self execution references another owner or an unsubmitted task")
+				var known []string
+				for id := range tasks {
+					known = append(known, id)
+				}
+				sort.Strings(known)
+				if len(known) > 12 {
+					known = known[:12]
+				}
+				// Name the legal values: a terse "references another owner or an
+				// unsubmitted task" leaves the arbiter guessing which task_id it should
+				// have copied, and each guess costs a whole receipt resubmission.
+				return fmt.Errorf("self execution references another owner or an unsubmitted task：task_id=%q 必须是本角色已提交的任务，可用的 task_id 共 %d 个，前 %d 个：%s", execution.TaskID, len(tasks), len(known), strings.Join(known, ", "))
 			}
 			covered[task.TaskID] = true
 			if selfExecutionActiveV2(execution.Status) {
@@ -331,7 +342,14 @@ func applyCharacterSelfExecutionsV2(receipt WorldArbitrationReceipt, stimulus Wo
 			}
 		}
 		if receipt.Finalized && len(covered) != len(tasks) {
-			return fmt.Errorf("final self execution must explicitly distinguish every task's actual or unstarted status")
+			var missing []string
+			for id := range tasks {
+				if !covered[id] {
+					missing = append(missing, id)
+				}
+			}
+			sort.Strings(missing)
+			return fmt.Errorf("final self execution must explicitly distinguish every task's actual or unstarted status：还缺 %d 个任务未在 self_executions 中给出状态（每个已提交任务都必须出现，未开始的写 unstarted）：%s", len(missing), strings.Join(missing, ", "))
 		}
 		// Legacy derivation mixes optional execution times with opaque IDs.
 		// Feed it the same canonical input used by persisted-state validation;

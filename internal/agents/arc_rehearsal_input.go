@@ -17,6 +17,34 @@ import (
 
 // BuildArcRehearsalInput only reads authored foundation and accepted state.
 // It never reads preplan projections, draft plans or its own rehearsal files.
+// splitArcRehearsalContracts separates this arc's own payoff obligations from the
+// whole-book contracts that stay background. An arc owes the contracts its own
+// chapters must pay off (the chapter-level contract refs map_contracts froze);
+// the finale and the other long non-negotiables belong to whichever arc actually
+// pays them off.
+func splitArcRehearsalContracts(compass domain.StoryCompass, outline []domain.OutlineEntry) (arcContracts, bookContracts []string) {
+	bookContracts = compactAgentStrings(append([]string{compass.EndingDirection}, compass.NonNegotiables...))
+	seen := map[string]bool{}
+	arcContracts = make([]string, 0, len(outline))
+	for _, entry := range outline {
+		for _, ref := range entry.ContractRefs {
+			text := strings.TrimSpace(ref.PlannedResolution)
+			if text == "" || seen[text] {
+				continue
+			}
+			seen[text] = true
+			arcContracts = append(arcContracts, fmt.Sprintf("%s（本弧第 %d 章须兑现）", text, entry.Chapter))
+		}
+	}
+	if len(arcContracts) == 0 {
+		// The validator requires at least one hard contract, and an arc still owes
+		// the local rules it can violate on its own (no early payoff of another
+		// arc's contract, no skipped foreshadowing).
+		arcContracts = append(arcContracts, "本弧不承担任何指南针合同的兑现点（全部合同由其他弧兑现）：不得提前消费后续弧的合同兑现，也不得让本弧角色越过自己的知识边界预支后续信息")
+	}
+	return compactAgentStrings(arcContracts), bookContracts
+}
+
 func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, configs ...bootstrap.Config) (domain.ArcRehearsalInput, error) {
 	input := domain.ArcRehearsalInput{Version: domain.ArcRehearsalVersion, ArcID: binding.ArcID, ArcFirstChapter: binding.ArcFirstChapter, ArcLastChapter: binding.ArcLastChapter, BaseCanonChapter: binding.BaseCanonChapter, BaseCanonRoot: binding.BaseCanonRoot, SourceRoot: binding.SourceRoot, SourceFiles: map[string]string{}}
 	if st == nil {
@@ -93,7 +121,17 @@ func BuildArcRehearsalInput(st *store.Store, binding domain.ArcRehearsalInput, c
 		}
 	}
 	sort.Slice(input.Outline, func(i, j int) bool { return input.Outline[i].Chapter < input.Outline[j].Chapter })
-	input.HardContracts = compactAgentStrings(append([]string{compass.EndingDirection}, compass.NonNegotiables...))
+	// Hard contracts are ARC-SCOPED. Feeding every arc the same whole-book list
+	// (ending direction plus all non-negotiables) made an honest first arc report
+	// the finale as unreachable — `unresolved` first, then `infeasible_prediction`
+	// once the rejection text pushed for definite verdicts — so the readiness gate
+	// could only block every book forever or be relaxed, and relaxing it silently
+	// let detailed planning proceed with unresolved finale contracts. The arc owes
+	// the contracts its own chapters must pay off; the whole-book set stays visible
+	// through ForwardContracts for foreshadowing only.
+	arcContracts, bookContracts := splitArcRehearsalContracts(compass, input.Outline)
+	input.HardContracts = arcContracts
+	input.ForwardContracts = bookContracts
 	if userRules.Status != rules.StatusReady {
 		return input, fmt.Errorf("arc rehearsal requires ready normalized user rules")
 	}

@@ -101,6 +101,14 @@ func normalizeArbitrationResolutions(inputs []arbitrationResolutionInput, stimul
 			resolution.Decision = proposal.Decision
 			resolution.IntendedAction = proposal.IntendedAction
 		}
+		// A null/absent post_state means "this actor's physical state is unchanged":
+		// the arbiter emits it whenever a resolution carries no physical delta, and
+		// treating it as a malformed input cost a whole arbitration resubmission per
+		// attempt (measured on chapter 1 of project-all).
+		if len(bytes.TrimSpace(input.PostState)) == 0 || bytes.Equal(bytes.TrimSpace(input.PostState), []byte("null")) {
+			result = append(result, resolution)
+			continue
+		}
 		var postInput characterPhysicalPostStateInput
 		if err := decodePhysicalInput(input.PostState, &postInput); err != nil {
 			return nil, fmt.Errorf("post_state %s: %w", resolution.AgentID, err)
